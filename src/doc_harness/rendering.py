@@ -35,7 +35,7 @@ def render_pdf(
         raise ValueError("dpi must be positive")
 
     try:
-        import fitz
+        import pymupdf as fitz
     except ImportError as exc:  # pragma: no cover - exercised in integration setup
         raise RuntimeError(
             "PDF rendering requires PyMuPDF; install the project's pdf extra"
