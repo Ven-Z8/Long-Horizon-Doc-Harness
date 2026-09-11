@@ -145,6 +145,26 @@ def test_transformers_embedder_uses_documented_inputs_and_normalizes_output():
     ]
 
 
+def test_transformers_embedder_bounds_backend_batches():
+    class FakeModel:
+        def __init__(self):
+            self.inputs = []
+
+        def process(self, inputs):
+            self.inputs.append(inputs)
+            return np.asarray([[1.0, 0.0] for _ in inputs], dtype=np.float32)
+
+    backend = FakeModel()
+    embedder = TransformersPageEmbedder(
+        model_name_or_path="unused", backend=backend, batch_size=2
+    )
+
+    encoded = embedder.encode_pages([page("doc-a", page_id) for page_id in range(5)])
+
+    assert encoded.shape == (5, 2)
+    assert [len(batch) for batch in backend.inputs] == [2, 2, 1]
+
+
 def test_page_embedder_is_a_runtime_protocol():
     assert isinstance(TransformersPageEmbedder, type)
     assert hasattr(PageEmbedder, "encode_pages")

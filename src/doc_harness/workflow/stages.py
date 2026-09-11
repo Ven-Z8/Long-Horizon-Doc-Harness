@@ -181,6 +181,7 @@ def build_indexes(
         checkpoint,
         model_revision=config.retrieval.embedding_revision,
         model_id=config.retrieval.embedding_model_id,
+        batch_size=config.retrieval.embedding_batch_size,
         max_pixels=config.render.max_pixels,
     )
     entries: list[dict[str, Any]] = []
@@ -269,6 +270,7 @@ def retrieve_questions(
         checkpoint,
         model_revision=config.retrieval.embedding_revision,
         model_id=config.retrieval.embedding_model_id,
+        batch_size=config.retrieval.embedding_batch_size,
         max_pixels=config.render.max_pixels,
     )
     rows: list[dict[str, Any]] = []
@@ -649,7 +651,7 @@ def build_run_manifest(
 ) -> RunManifest:
     """Create a resumable identity for a staged run."""
 
-    code_files = sorted(Path("src/doc_harness").glob("*.py"))
+    code_files = sorted(Path("src/doc_harness").rglob("*.py"))
     code_hash = _canonical_hash({str(path): sha256_file(path) for path in code_files})
     models_file = Path("models.lock")
     dependencies = [path for path in (Path("pyproject.toml"), Path("uv.lock")) if path.is_file()]

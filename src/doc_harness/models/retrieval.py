@@ -282,6 +282,7 @@ class TransformersPageEmbedder:
         model_name_or_path: str | Path,
         *,
         instruction: str = "Retrieve relevant evidence for the user's question.",
+        batch_size: int = 1,
         model_revision: str = "",
         model_id: str | None = None,
         backend: Any | None = None,
@@ -289,6 +290,9 @@ class TransformersPageEmbedder:
     ) -> None:
         self.model_name_or_path = str(model_name_or_path)
         self.instruction = str(instruction)
+        self.batch_size = int(batch_size)
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
         self.model_revision = str(model_revision)
         self.model_id = str(model_id if model_id is not None else model_name_or_path)
         self._backend = backend
@@ -316,8 +320,16 @@ class TransformersPageEmbedder:
         )
 
     def _encode(self, inputs: list[dict[str, Any]]) -> np.ndarray:
-        result = self._backend.process(inputs)
-        return normalize_embeddings(result)
+        chunks: list[np.ndarray] = []
+        for start in range(0, len(inputs), self.batch_size):
+            batch = inputs[start : start + self.batch_size]
+            result = normalize_embeddings(self._backend.process(batch))
+            if result.shape[0] != len(batch):
+                raise ValueError(
+                    f"embedding row count mismatch: expected {len(batch)}, got {result.shape[0]}"
+                )
+            chunks.append(result)
+        return np.concatenate(chunks, axis=0)
 
     def encode_pages(self, pages: list[Page]) -> np.ndarray:
         if not pages:

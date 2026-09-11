@@ -35,6 +35,7 @@ class RetrievalConfig(StrictModel):
     enabled: bool = False
     candidate_k: int = Field(default=20, gt=0)
     selected_k: int = Field(default=6, gt=0)
+    embedding_batch_size: int = Field(default=1, gt=0)
     embedding_model_id: str = "Qwen/Qwen3-VL-Embedding-2B"
     embedding_revision: str = "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
     reranker_model_id: str = "Qwen/Qwen3-VL-Reranker-2B"
