@@ -1,0 +1,5 @@
+# Model revisions are deliberately explicit and were resolved from Hugging Face on 2026-09-11.
+reasoner = Qwen/Qwen3.5-4B@851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+ocr = baidu/Qianfan-OCR@623bf5d20d446abdb36606aa4547cd0c18886fe5
+retriever = Qwen/Qwen3-VL-Embedding-2B@9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda
+reranker = Qwen/Qwen3-VL-Reranker-2B@4bd860ac4f15ad1897a214615cccc700f8f71818
