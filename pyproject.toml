@@ -15,7 +15,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0,<9"]
 pdf = ["PyMuPDF>=1.24,<2", "Pillow>=10,<13"]
-gpu = ["accelerate>=1.15", "torch>=2.6", "torchvision>=0.29", "transformers>=4.51"]
+gpu = [
+  "accelerate>=1.15",
+  "qwen-vl-utils>=0.0.14",
+  "scipy>=1.13",
+  "torch>=2.6",
+  "torchvision>=0.29",
+  "transformers>=4.57.0",
+]
 eval = ["openai>=1.0,<2"]
 
 [tool.hatch.build.targets.wheel]

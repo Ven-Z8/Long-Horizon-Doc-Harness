@@ -204,7 +204,12 @@ def run_v2_batch(
     for sample in selected:
         key = (sample.doc_id, normalize_question(sample.question))
         prior = record_by_key.get(key)
-        if key not in predictions or prior is None or prior.status != Status.ok:
+        if (
+            key not in predictions
+            or prior is None
+            or prior.status != Status.ok
+            or prior.parse_status == "invalid"
+        ):
             groups.setdefault(sample.doc_id, []).append(sample)
 
     for doc_id, doc_samples in groups.items():
@@ -230,15 +235,27 @@ def run_v2_batch(
                 prediction = Prediction(
                     doc_id=sample.doc_id,
                     question=normalize_question(sample.question),
-                    response="Not answerable",
+                    response="",
                 )
             else:
                 try:
                     request = build_request(
                         sample, pages, prompt, config.effective_hash()
                     )
-                    draft = runner.run(request)
-                    response = "Not answerable" if draft.answer is None else draft.answer
+                    generation = None
+                    generate = getattr(runner, "generate", None)
+                    if callable(generate):
+                        generation = generate(request)
+                        if generation.raw_response:
+                            response = generation.raw_response
+                        elif generation.draft is None:
+                            response = ""
+                        else:
+                            response = generation.draft.answer or ""
+                        draft = generation.draft
+                    else:
+                        draft = runner.run(request)
+                        response = "" if draft.answer is None else draft.answer
                     prediction = Prediction(
                         doc_id=sample.doc_id,
                         question=normalize_question(sample.question),
@@ -255,13 +272,30 @@ def run_v2_batch(
                         model_revision=config.model.revision,
                         page_ids=[page.page_id for page in pages],
                         latency_ms=(time.perf_counter() - started) * 1000,
+                        raw_response=(generation.raw_response if generation else None),
+                        parse_status=(generation.parse_status if generation else None),
+                        finish_reason=(generation.finish_reason if generation else None),
+                        input_tokens=(generation.input_tokens if generation else None),
+                        output_tokens=(generation.output_tokens if generation else None),
+                        failure=(generation.failure if generation else None),
+                        metadata=(
+                            {
+                                "parsed_answer": draft.answer,
+                                "evidence": [
+                                    span.model_dump(mode="json") for span in draft.evidence
+                                ],
+                                "insufficient_evidence": draft.insufficient_evidence,
+                            }
+                            if draft is not None
+                            else {}
+                        ),
                     )
                 except Exception as exc:  # preserve one explicit failure row per sample
                     record = _failure_record(sample, config, started, exc, "answer")
                     prediction = Prediction(
                         doc_id=sample.doc_id,
                         question=normalize_question(sample.question),
-                        response="Not answerable",
+                        response="",
                     )
             predictions[key] = prediction
             write_run_record(record, records_path)

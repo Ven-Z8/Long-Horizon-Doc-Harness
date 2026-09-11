@@ -1,0 +1,17 @@
+[model]
+model_id = "Qwen/Qwen3.5-4B"
+revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+prompt_version = "baseline-repaired-v1"
+
+[render]
+dpi = 144
+page_policy = "all"
+max_pixels = 262144
+
+[generation]
+max_new_tokens = 256
+do_sample = false
+
+[paths]
+artifact_dir = "artifacts"
+cache_dir = "cache"

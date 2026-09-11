@@ -31,6 +31,40 @@ class GenerationConfig(StrictModel):
     temperature: float | None = Field(default=None, ge=0)
 
 
+class RetrievalConfig(StrictModel):
+    enabled: bool = False
+    candidate_k: int = Field(default=20, gt=0)
+    selected_k: int = Field(default=6, gt=0)
+    embedding_model_id: str = "Qwen/Qwen3-VL-Embedding-2B"
+    embedding_revision: str = "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
+    reranker_model_id: str = "Qwen/Qwen3-VL-Reranker-2B"
+    reranker_revision: str = "4bd860ac4f15ad1897a214615cccc700f8f71818"
+
+
+class OCRConfig(StrictModel):
+    enabled: bool = False
+    model_id: str = "baidu/Qianfan-OCR"
+    revision: str = "623bf5d20d446abdb36606aa4547cd0c18886fe5"
+    prompt_version: str = "qianfan-ocr-v1"
+    max_text_tokens: int = Field(default=12_000, gt=0)
+    max_new_tokens: int = Field(default=4096, gt=0)
+
+
+class EvidenceConfig(StrictModel):
+    max_pages: int = Field(default=6, gt=0)
+    max_pixels_per_image: int = Field(default=1_048_576, gt=0)
+    max_total_image_pixels: int = Field(default=6_291_456, gt=0)
+    max_text_tokens: int = Field(default=12_000, gt=0)
+    reserved_output_tokens: int = Field(default=1_024, ge=0)
+
+
+class VerificationConfig(StrictModel):
+    enabled: bool = False
+    max_expansion_rounds: int = Field(default=2, ge=0)
+    max_pages: int = Field(default=24, gt=0)
+    wall_time_seconds: int = Field(default=300, gt=0)
+
+
 class PathConfig(StrictModel):
     artifact_dir: Path = Path("artifacts")
     cache_dir: Path = Path("cache")
@@ -40,6 +74,10 @@ class HarnessConfig(StrictModel):
     model: ModelConfig
     render: RenderConfig = Field(default_factory=RenderConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
+    evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     paths: PathConfig = Field(default_factory=PathConfig)
 
     def effective_hash(self) -> str:

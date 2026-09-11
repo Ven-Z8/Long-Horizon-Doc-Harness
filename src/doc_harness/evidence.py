@@ -111,6 +111,8 @@ class EvidenceImage(StrictModel):
     pixel_count: int = Field(gt=0)
     region: EvidenceRegion | None = None
     label: str
+    source_render_sha256: str | None = None
+    source_image_path: str | None = None
 
     @model_validator(mode="after")
     def image_source_is_consistent(self) -> "EvidenceImage":
@@ -145,6 +147,8 @@ class EvidenceProvenance(StrictModel):
     prompt_version: str | None = None
     ocr_config_hash: str | None = None
     extraction_status: str | None = None
+    focused_render_sha256: str | None = None
+    source_image_path: str | None = None
 
 
 def _estimate_tokens(text: str) -> int:
@@ -275,7 +279,11 @@ def build_bundle(
         if page_id not in page_by_id:
             raise ValueError(f"parsed page {page_id} is not in the selected pages")
         render_hash = _parsed_value(item, "render_sha256", "")
-        if render_hash not in (None, "", page_by_id[page_id].render_sha256):
+        valid_render_hashes = {
+            page_by_id[page_id].render_sha256,
+            page_by_id[page_id].source_render_sha256,
+        }
+        if render_hash not in (None, "") and render_hash not in valid_render_hashes:
             raise ValueError(f"parsed OCR for page {page_id} has a stale render")
         parsed_by_id[page_id] = item
 
@@ -329,6 +337,8 @@ def build_bundle(
                     pixel_count=pixels,
                     region=region,
                     label=f"page_id={page.page_id}",
+                    source_render_sha256=page.source_render_sha256,
+                    source_image_path=page.source_image_path,
                 )
             )
             if region is not None:
@@ -346,14 +356,18 @@ def build_bundle(
         provenance[page.page_id] = EvidenceProvenance(
             document_id=document_id,
             page_id=page.page_id,
-            render_sha256=page.render_sha256,
+            render_sha256=page.source_render_sha256 or page.render_sha256,
             image_path=page.image_path,
+            source_image_path=page.source_image_path or page.image_path,
             parser_model=_parsed_value(parser_item, "parser_model") if parser_item is not None else None,
             parser_revision=_parsed_value(parser_item, "parser_revision") if parser_item is not None else None,
             prompt_version=_parsed_value(parser_item, "prompt_version") if parser_item is not None else None,
             ocr_config_hash=_parsed_value(parser_item, "ocr_config_hash") if parser_item is not None else None,
             extraction_status=(
                 _status(parser_item).value if parser_item is not None else None
+            ),
+            focused_render_sha256=(
+                page.render_sha256 if page.source_render_sha256 is not None else None
             ),
         )
 

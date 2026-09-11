@@ -22,7 +22,9 @@ import numpy as np
 from .contracts import Page, RankedPage, SafeQuestion
 
 
-_INDEX_SCHEMA_VERSION = 1
+# Version 2 records the optional focused-render source identity on each Page.
+# Older indexes are intentionally rebuilt rather than silently treated as fresh.
+_INDEX_SCHEMA_VERSION = 2
 
 
 def _canonical_json(value: Any) -> str:
@@ -142,6 +144,12 @@ def _as_numpy(values: Any) -> np.ndarray:
     detached = getattr(values, "detach", None)
     if callable(detached):
         values = detached()
+    # NumPy has no bfloat16 dtype.  The embedding checkpoint intentionally
+    # runs in bfloat16 on CUDA, so cast before moving the tensor to CPU rather
+    # than letting ``Tensor.numpy()`` fail with an opaque scalar-type error.
+    to_float = getattr(values, "float", None)
+    if callable(to_float):
+        values = to_float()
     cpu = getattr(values, "cpu", None)
     if callable(cpu):
         values = cpu()
@@ -171,6 +179,12 @@ def normalize_embeddings(values: Any, *, expected_dim: int | None = None) -> np.
         raise ValueError(
             f"embedding dimension mismatch: expected {expected_dim}, got {matrix.shape[1]}"
         )
+    # Persisted indexes already contain normalized float32 vectors.  A second
+    # normalization can change the last bit of every value and invalidate the
+    # stored checksum, so preserve vectors that are already unit length within
+    # float32 tolerance.
+    if np.allclose(norms, 1.0, rtol=1e-5, atol=1e-6):
+        return matrix.astype(np.float32, copy=False)
     return (matrix / norms[:, None]).astype(np.float32, copy=False)
 
 

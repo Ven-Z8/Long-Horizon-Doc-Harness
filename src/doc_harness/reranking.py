@@ -68,6 +68,55 @@ def _finite_score(value: Any) -> float:
     return score
 
 
+def _patch_mm_token_type_batching(backend: Any) -> Any:
+    """Normalize the bundled script's multimodal token-type list.
+
+    Recent Transformers releases return ``mm_token_type_ids`` as a list from
+    the processor, while the Qwen3-VL model forward pass expects a padded
+    tensor aligned with ``input_ids``.  The upstream script pads only
+    ``input_ids``.  Keep the checkpoint script untouched and repair this
+    boundary in our adapter so reranking remains reproducible across the
+    supported processor versions.
+    """
+
+    original_tokenize = backend.tokenize
+
+    def tokenize(*args: Any, **kwargs: Any) -> Any:
+        import torch
+
+        result = original_tokenize(*args, **kwargs)
+        token_types = result.get("mm_token_type_ids")
+        if not isinstance(token_types, list):
+            return result
+        input_ids = result.get("input_ids")
+        attention_mask = result.get("attention_mask")
+        if not hasattr(input_ids, "shape"):
+            return result
+        batch_size, sequence_length = input_ids.shape[:2]
+        padded = torch.zeros(
+            (batch_size, sequence_length), dtype=torch.int32, device=input_ids.device
+        )
+        for batch_index in range(min(batch_size, len(token_types))):
+            values = token_types[batch_index]
+            if hasattr(values, "detach"):
+                values = values.detach().cpu()
+            values = torch.as_tensor(values, dtype=torch.int32).reshape(-1)
+            if attention_mask is not None:
+                positions = attention_mask[batch_index].bool().nonzero(as_tuple=False).reshape(-1)
+            else:
+                positions = torch.arange(sequence_length)
+            count = min(int(values.numel()), int(positions.numel()))
+            if count:
+                padded[batch_index, positions[-count:].to(input_ids.device)] = values[-count:].to(
+                    input_ids.device
+                )
+        result["mm_token_type_ids"] = padded
+        return result
+
+    backend.tokenize = tokenize
+    return backend
+
+
 class QwenPageReranker:
     """Adapter for the bundled Qwen3-VL yes/no relevance scorer."""
 
@@ -103,11 +152,12 @@ class QwenPageReranker:
             raise RuntimeError(f"cannot load reranker adapter from {script_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.Qwen3VLReranker(
+        backend = module.Qwen3VLReranker(
             model_name_or_path=self.model_name_or_path,
             default_instruction=self.instruction,
             **model_kwargs,
         )
+        return _patch_mm_token_type_batching(backend)
 
     def rank(self, question: SafeQuestion, pages: list[Page]) -> list[RankedPage]:
         if not pages:

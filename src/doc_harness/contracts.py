@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,6 +24,8 @@ class Page(StrictModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     render_sha256: str
+    source_render_sha256: str | None = None
+    source_image_path: str | None = None
 
 
 class RankedPage(StrictModel):
@@ -60,6 +62,13 @@ class DraftAnswer(StrictModel):
         return self
 
 
+class SafeQuestion(StrictModel):
+    """The only benchmark question fields allowed into inference stages."""
+
+    document_id: str
+    question: str
+
+
 class VerifyDecision(str, Enum):
     accept = "accept"
     correct = "correct"
@@ -86,6 +95,26 @@ class StageFailure(StrictModel):
     error_type: str
     message: str
     retryable: bool
+
+
+class GenerationResult(StrictModel):
+    """Raw generation plus independently validated parsing metadata."""
+
+    raw_response: str
+    draft: DraftAnswer | None
+    parse_status: Literal["valid", "invalid", "empty"]
+    finish_reason: Literal["eos", "length", "error", "unknown"]
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    failure: StageFailure | None = None
+
+    @model_validator(mode="after")
+    def parsed_state_agrees(self) -> "GenerationResult":
+        if (self.parse_status == "valid") != (self.draft is not None):
+            raise ValueError("valid generations require a draft and invalid ones do not")
+        if self.parse_status == "empty" and self.raw_response:
+            raise ValueError("empty parse status requires an empty raw response")
+        return self
 
 
 class BenchmarkSample(StrictModel):
@@ -120,6 +149,11 @@ class RunRecord(StrictModel):
     question: str
     status: Status
     response: str | None = None
+    raw_response: str | None = None
+    parse_status: Literal["valid", "invalid", "empty"] | None = None
+    finish_reason: Literal["eos", "length", "error", "unknown"] | None = None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
     config_hash: str
     model_id: str | None = None
     model_revision: str | None = None

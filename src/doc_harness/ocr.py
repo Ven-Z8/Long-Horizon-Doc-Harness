@@ -400,12 +400,16 @@ class QianfanOCRParser:
     ) -> "QianfanOCRParser":
         try:
             import torch
-            from transformers import AutoModel, AutoProcessor
+            from transformers import AutoProcessor
+            try:
+                from transformers import AutoModelForImageTextToText as ModelClass
+            except ImportError:  # pragma: no cover - older Transformers fallback
+                from transformers import AutoModelForCausalLM as ModelClass
         except ImportError as exc:  # pragma: no cover - optional GPU integration
             raise RuntimeError("Qianfan OCR requires torch and transformers") from exc
 
         processor = AutoProcessor.from_pretrained(model_id, revision=revision, trust_remote_code=True)
-        model = AutoModel.from_pretrained(
+        model = ModelClass.from_pretrained(
             model_id,
             revision=revision,
             trust_remote_code=True,
@@ -426,7 +430,22 @@ class QianfanOCRParser:
         prompt = "Transcribe this document page as faithful markdown. Preserve tables and layout."
         image = Image.open(Path(page.image_path)).convert("RGB")
         try:
-            inputs = self.processor(text=prompt, images=image, return_tensors="pt")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+            inputs = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
             if hasattr(inputs, "to"):
                 inputs = inputs.to(self.model.device)
             with torch.inference_mode():
@@ -435,7 +454,8 @@ class QianfanOCRParser:
                     max_new_tokens=self.max_new_tokens,
                     do_sample=self.do_sample,
                 )
-            text = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+            generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
+            text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             return OCRParsedPage(
                 document_id=page.document_id,
                 page_id=page.page_id,

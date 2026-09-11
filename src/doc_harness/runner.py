@@ -7,7 +7,13 @@ import re
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from .contracts import DraftAnswer, EvidenceSpan, ModelRequest
+from .contracts import (
+    DraftAnswer,
+    EvidenceSpan,
+    GenerationResult,
+    ModelRequest,
+    StageFailure,
+)
 
 
 class ModelRunner(Protocol):
@@ -48,6 +54,31 @@ class QwenTransformersRunner:
         self.do_sample = do_sample
         self.max_pixels = max_pixels
 
+    def _finish_reason(self, generated: object) -> str:
+        """Infer termination only from generated token IDs and known EOS IDs."""
+
+        length = int(getattr(generated, "shape", (0, 0))[1])
+        eos_ids: set[int] = set()
+        generation_config = getattr(self.model, "generation_config", None)
+        configured = getattr(generation_config, "eos_token_id", None)
+        if configured is None:
+            tokenizer = getattr(self.processor, "tokenizer", None)
+            configured = getattr(tokenizer, "eos_token_id", None)
+        if isinstance(configured, (list, tuple, set)):
+            eos_ids.update(int(item) for item in configured)
+        elif configured is not None:
+            eos_ids.add(int(configured))
+        if length:
+            last = generated[0, length - 1]
+            try:
+                if int(last.item() if hasattr(last, "item") else last) in eos_ids:
+                    return "eos"
+            except (TypeError, ValueError):
+                pass
+        if length >= self.max_new_tokens:
+            return "length"
+        return "unknown"
+
     @classmethod
     def from_pretrained(
         cls,
@@ -84,6 +115,16 @@ class QwenTransformersRunner:
         return cls(processor, model, max_new_tokens, do_sample, max_pixels)
 
     def run(self, request: ModelRequest) -> DraftAnswer:
+        result = self.generate(request)
+        if result.draft is None:
+            if result.failure is not None:
+                raise ValueError(result.failure.message)
+            raise ValueError("model returned no parsed answer")
+        return result.draft
+
+    def generate(self, request: ModelRequest) -> GenerationResult:
+        """Generate raw text and preserve parsing/termination state separately."""
+
         if len(request.page_ids) != len(request.image_paths):
             raise ValueError("page_ids and image_paths must have the same length")
         try:
@@ -119,7 +160,40 @@ class QwenTransformersRunner:
                 )
             generated = output_ids[:, inputs["input_ids"].shape[1] :]
             text = self.processor.batch_decode(generated, skip_special_tokens=True)[0]
-            return parse_draft_answer(text)
+            if not text.strip():
+                return GenerationResult(
+                    raw_response="",
+                    draft=None,
+                    parse_status="empty",
+                    finish_reason=self._finish_reason(generated),
+                    input_tokens=int(inputs["input_ids"].numel()),
+                    output_tokens=int(generated.numel()),
+                )
+            try:
+                draft = parse_draft_answer(text)
+            except ValueError as exc:
+                return GenerationResult(
+                    raw_response=text,
+                    draft=None,
+                    parse_status="invalid",
+                    finish_reason=self._finish_reason(generated),
+                    input_tokens=int(inputs["input_ids"].numel()),
+                    output_tokens=int(generated.numel()),
+                    failure=StageFailure(
+                        stage="parse",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                        retryable=True,
+                    ),
+                )
+            return GenerationResult(
+                raw_response=text,
+                draft=draft,
+                parse_status="valid",
+                finish_reason=self._finish_reason(generated),
+                input_tokens=int(inputs["input_ids"].numel()),
+                output_tokens=int(generated.numel()),
+            )
         finally:
             for image in images:
                 image.close()
@@ -152,9 +226,6 @@ def parse_draft_answer(text: str) -> DraftAnswer:
                 return DraftAnswer.model_validate(payload)
             except Exception:
                 continue
-    # Keep a useful answer when a local checkpoint ignores the JSON-only instruction.
-    # The V2 judge scores the complete response semantically, so preserving the model's
-    # prose is more informative than converting a parseable answer into an abstention.
-    if candidate:
-        return DraftAnswer(answer=candidate, evidence=[], insufficient_evidence=False)
-    raise ValueError("model response is empty")
+    raise ValueError(
+        "model response does not contain a valid DraftAnswer JSON object"
+    )

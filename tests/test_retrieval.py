@@ -91,6 +91,19 @@ def test_changed_identity_invalidates_saved_index(
         PageIndex.load(cache_path, expected_identity=replace(identity(), **{field: value}))
 
 
+def test_saved_normalized_vectors_round_trip_without_checksum_drift(tmp_path: Path):
+    index = PageIndex(
+        [page("doc-a", 0)],
+        np.asarray([[0.6, 0.8]], dtype=np.float32),
+        identity=identity(),
+    )
+    cache_path = tmp_path / "pages.npz"
+    index.save(cache_path)
+    loaded = PageIndex.load(cache_path)
+    assert loaded.fingerprint == index.fingerprint
+    assert np.array_equal(loaded.vectors, index.vectors)
+
+
 def test_index_rejects_nonfinite_and_dimension_mismatch_vectors():
     pages = [page("doc-a", 0)]
     with pytest.raises(ValueError, match="finite"):

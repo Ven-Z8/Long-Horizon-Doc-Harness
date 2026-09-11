@@ -5,6 +5,7 @@ import pytest
 
 from doc_harness.batch import load_v2_samples, run_v2_batch
 from doc_harness.config import load_config
+from doc_harness.contracts import DraftAnswer, GenerationResult
 from doc_harness.runner import FakeRunner
 
 
@@ -147,3 +148,53 @@ def test_run_v2_batch_retries_a_failed_row(tmp_path: Path):
     )
     assert json.loads(predictions_path.read_text())[0]["response"] == "recovered"
     assert len(records_path.read_text().splitlines()) == 2
+
+
+def test_run_v2_batch_preserves_raw_generation_and_parse_state(tmp_path: Path):
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    write_pdf(documents / "doc.pdf")
+    samples_path = tmp_path / "samples.json"
+    samples_path.write_text(
+        json.dumps(
+            [
+                {
+                    "doc_id": "doc.pdf",
+                    "question": "Q1",
+                    "answer": "A1",
+                    "evidence_pages": "[0]",
+                    "evidence_sources": "[]",
+                }
+            ]
+        )
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[model]\nmodel_id = "test"\nrevision = "rev"\n')
+    config = load_config(config_path)
+
+    class RawRunner:
+        def generate(self, request):
+            return GenerationResult(
+                raw_response='{"answer":"raw answer"}',
+                draft=DraftAnswer(answer="parsed answer", evidence=[], insufficient_evidence=False),
+                parse_status="valid",
+                finish_reason="eos",
+                input_tokens=10,
+                output_tokens=3,
+            )
+
+    predictions_path = tmp_path / "predictions.json"
+    records_path = tmp_path / "runs.jsonl"
+    run_v2_batch(
+        samples_path,
+        documents,
+        predictions_path,
+        records_path,
+        tmp_path / "rendered",
+        config,
+        RawRunner(),
+    )
+    assert json.loads(predictions_path.read_text())[0]["response"] == '{"answer":"raw answer"}'
+    record = json.loads(records_path.read_text())
+    assert record["raw_response"] == '{"answer":"raw answer"}'
+    assert record["parse_status"] == "valid"

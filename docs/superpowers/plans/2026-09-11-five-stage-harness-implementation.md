@@ -1,6 +1,6 @@
 # Five-Stage Document Harness Implementation Plan
 
-> **For agentic workers:** Use `superpowers:executing-plans` to implement this plan task by task. Steps use checkboxes for tracking. This document authorizes no execution by itself: the current user request is documentation only.
+> **Execution status:** This plan is being executed in the repository. The historical baseline remains preserved; new staged artifacts use fresh run directories and the pinned model identities below.
 
 **Goal:** Build and measure a reproducible four-model document harness that improves MMLongBench-Doc V2 performance through trustworthy measurement, retrieval and reranking, OCR with focused visual reading, evidence verification, and controlled evaluation.
 
@@ -420,4 +420,4 @@ Ask resource questions with measured evidence and a concrete affected milestone.
 - [ ] Ablations use the same sample keys and judge configuration, with full failure accounting.
 - [ ] Final claims distinguish development, holdout, and full-corpus results.
 
-**Planning self-review:** All five requested stages map to tasks above. Baseline invariants are carried forward; its explicitly deferred extensions are addressed in stages 2–4. Training and new benchmarks remain out of scope. Proposed budgets are identified as experiments rather than verified capabilities. This document changes no runtime code, configuration, model installation, or running job.
+**Implementation status:** The runtime now includes the typed contracts, strict generation provenance, audited baseline tooling, retrieval/reranking/OCR/evidence adapters, bounded verification and expansion, deterministic splits, ablation comparison, and the `build-index`/`run-pipeline` CLI phases. Real one-page probes have passed for all four downloaded checkpoints. Full benchmark execution remains a measured next run after a small staged smoke and resource check.

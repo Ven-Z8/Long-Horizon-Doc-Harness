@@ -126,3 +126,29 @@ def test_bundle_omits_page_that_exceeds_per_image_budget(tmp_path: Path):
     assert bundle.images == []
     assert bundle.included_page_ids == []
     assert bundle.omitted_items[0].reason == "per_image_pixel_budget"
+
+
+def test_bundle_accepts_focused_render_with_original_ocr_provenance(tmp_path: Path):
+    source = _page(tmp_path, 0)
+    focused = source.model_copy(
+        update={
+            "image_path": source.image_path,
+            "width": 50,
+            "height": 50,
+            "render_sha256": "focused-hash",
+            "source_render_sha256": source.render_sha256,
+            "source_image_path": source.image_path,
+        }
+    )
+    budget = EvidenceBudget(
+        max_pages=1,
+        max_pixels_per_image=2_500,
+        max_total_image_pixels=2_500,
+        max_text_tokens=100,
+        reserved_output_tokens=10,
+    )
+    bundle = build_bundle(_question(), [focused], [_parsed(source, "visible")], budget)
+    assert bundle.provenance[0].render_sha256 == source.render_sha256
+    assert bundle.provenance[0].focused_render_sha256 == "focused-hash"
+    assert bundle.provenance[0].source_image_path == source.image_path
+    assert bundle.images[0].source_render_sha256 == source.render_sha256

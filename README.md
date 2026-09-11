@@ -1,6 +1,19 @@
 # Long-Horizon Doc Harness
 
-This repository is the first implementation slice of a long-document, multimodal QA harness. The initial milestone is a reproducible direct-input Qwen3.5-4B baseline for MMLongBench-Doc V2. Retrieval, OCR, reranking, verification, and training are planned extensions and remain behind measured baseline results.
+This repository implements a reproducible long-document, multimodal QA harness. The first benchmark target is MMLongBench-Doc V2. The historical 103-question baseline is preserved, while the experimental path adds document-scoped retrieval, reranking, Qianfan OCR, bounded evidence bundles, verification, and controlled comparisons.
+
+The four downloaded checkpoints have fixed roles:
+
+| Checkpoint | Harness role |
+| --- | --- |
+| `Qwen/Qwen3.5-4B` | answer generation and final response verification |
+| `Qwen/Qwen3-VL-Embedding-2B` | page and question embeddings |
+| `Qwen/Qwen3-VL-Reranker-2B` | question/page relevance scoring |
+| `baidu/Qianfan-OCR` | page-to-Markdown transcription |
+
+The staged runner loads one heavyweight checkpoint at a time. Each phase writes an
+artifact that the next phase validates, so an RTX 4090 does not need all four
+models resident together.
 
 ## Local setup
 
@@ -70,6 +83,54 @@ uv run python -m doc_harness.cli run-v2 \
 ```
 
 Remove `--limit` for the complete baseline. The model processes every page of each PDF; the processor downsizes each page to the configured `max_pixels` budget and the render cache is reused on resume.
+
+## Four-model staged run
+
+Build the document indexes once. This renders pages and runs the embedding model;
+the index stores page IDs, render hashes, model revision, and normalized vectors:
+
+```bash
+uv run python -m doc_harness.cli build-index \
+  --config configs/experiments/retrieval.toml \
+  --documents data/documents \
+  --render-dir cache/v2-pages \
+  --output artifacts/index
+```
+
+Run the focused pipeline on a development subset. `--limit 100` selects exactly
+the first 100 benchmark keys in the samples file; omit it only after the staged
+smoke run and resource checks succeed:
+
+```bash
+uv run python -m doc_harness.cli run-pipeline \
+  --config configs/experiments/expanded.toml \
+  --samples benchmark/mmlongbench-doc-v2/data/samples.json \
+  --documents data/documents \
+  --render-dir cache/v2-pages \
+  --index-manifest artifacts/index/index-manifest.json \
+  --limit 100 \
+  --run-dir artifacts/runs/B5-dev-100
+```
+
+The run directory contains `manifest.json`, safe selected sample keys,
+`stages/retrieval.jsonl`, reranking manifests, OCR outputs, `records.jsonl`, and
+`predictions.json`. Raw generations, parse status, termination state, selected
+page IDs, OCR cache identities, verification decisions, and failures stay in the
+records; runtime failures are never replaced with an abstention string.
+
+The explicit ablation configurations are in `configs/experiments/`:
+`baseline-repaired`, `retrieval`, `reranked`, `ocr-visual`, `verified`, and
+`expanded`. Compare only runs with identical sample keys and valid judge verdicts:
+
+```bash
+uv run python -m doc_harness.cli compare-runs \
+  --runs artifacts/runs/B0-dev artifacts/runs/B5-dev \
+  --output artifacts/reports/development.json
+```
+
+The reproducibility and promotion rules are documented in
+`docs/experiments/runbook.md` and the five-stage plan in
+`docs/superpowers/plans/2026-09-11-five-stage-harness-implementation.md`.
 
 ## V2 scoring
 

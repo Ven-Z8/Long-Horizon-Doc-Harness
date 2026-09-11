@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 from typing import Sequence
 
@@ -76,3 +77,39 @@ def render_pdf(
         return pages
     finally:
         document.close()
+
+
+def resize_page_for_budget(page: Page, max_pixels: int, output_dir: Path) -> Page:
+    """Create a deterministic focused render without losing source identity."""
+
+    if max_pixels <= 0:
+        raise ValueError("max_pixels must be positive")
+    source_pixels = page.width * page.height
+    if source_pixels <= max_pixels:
+        return page
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - optional PDF/image extra
+        raise RuntimeError(
+            "focused evidence rendering requires Pillow; install the pdf extra"
+        ) from exc
+    scale = math.sqrt(max_pixels / source_pixels)
+    width = max(1, int(page.width * scale))
+    height = max(1, int(page.height * scale))
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / f"{page.document_id.replace('/', '_')}-page-{page.page_id:04d}.png"
+    with Image.open(page.image_path).convert("RGB") as image:
+        resized = image.resize((width, height), Image.Resampling.LANCZOS)
+        resized.save(target, format="PNG", optimize=False)
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    return page.model_copy(
+        update={
+            "image_path": str(target),
+            "width": width,
+            "height": height,
+            "render_sha256": digest,
+            "source_render_sha256": page.source_render_sha256 or page.render_sha256,
+            "source_image_path": page.source_image_path or page.image_path,
+        }
+    )

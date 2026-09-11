@@ -23,3 +23,19 @@ def test_lock_hash_changes_when_a_lock_changes(tmp_path: Path):
     first = lock_hash([lock])
     lock.write_text("two")
     assert lock_hash([lock]) != first
+
+
+def test_stage_config_records_four_model_roles_and_budgets(tmp_path: Path):
+    config_path = tmp_path / "stages.toml"
+    config_path.write_text(
+        '[model]\nmodel_id = "reasoner"\nrevision = "r"\n'
+        '[retrieval]\nenabled = true\ncandidate_k = 20\nselected_k = 6\n'
+        '[ocr]\nenabled = true\nmax_text_tokens = 12000\n'
+        '[evidence]\nmax_pages = 6\nmax_total_image_pixels = 6291456\n'
+        '[verification]\nenabled = true\nmax_expansion_rounds = 2\n'
+    )
+    config = load_config(config_path)
+    assert config.retrieval.candidate_k == 20
+    assert config.ocr.max_text_tokens == 12000
+    assert config.evidence.max_pages == 6
+    assert config.verification.max_expansion_rounds == 2

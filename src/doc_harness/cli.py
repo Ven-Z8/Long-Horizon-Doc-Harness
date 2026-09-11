@@ -12,9 +12,30 @@ from typing import Sequence
 from .batch import run_v2_batch
 from .config import load_config
 from .contracts import BenchmarkSample, ModelRequest, Page, Prediction, RunRecord, StageFailure, Status
+from .evaluation import score_run
+from .experiments import compare_runs, write_report
+from .manifests import audit_records
 from .protocol import build_request, export_v2_predictions, validate_prediction_coverage
-from .records import write_run_record
+from .records import read_run_records, write_run_record
 from .runner import FakeRunner, ModelRunner, QwenTransformersRunner
+from .splits import create_document_split
+from .stages import (
+    answer_questions,
+    build_indexes,
+    build_run_manifest,
+    ocr_questions,
+    rerank_questions,
+    retrieve_questions,
+)
+
+
+def _write_cli_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
 
 
 def _synthetic_pages(document_id: str, image_paths: Sequence[str]) -> list[Page]:
@@ -110,6 +131,38 @@ def export_v2_from_files(samples_path: Path, predictions_path: Path, output_path
     export_v2_predictions(predictions, output_path)
 
 
+def _read_exposed_keys(path: Path) -> list[tuple[str, str]]:
+    """Read the minimal document/question fields needed for split creation.
+
+    Run records are normally validated through ``read_run_records``.  Split
+    creation also accepts audit exports and lightweight exposure logs, so it
+    intentionally falls back to the two identifying fields when a line is not
+    a complete ``RunRecord``.
+    """
+
+    try:
+        records = read_run_records(path)
+    except ValueError:
+        records = []
+        with Path(path).open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid exposure record on line {line_number}") from exc
+                document_id = payload.get("document_id", payload.get("doc_id"))
+                question = payload.get("question")
+                if document_id is None or question is None:
+                    raise ValueError(
+                        f"exposure record on line {line_number} needs document_id/doc_id and question"
+                    )
+                records.append((str(document_id), str(question)))
+        return records
+    return [(record.document_id, record.question) for record in records]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="doc-harness")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -146,6 +199,50 @@ def _parser() -> argparse.ArgumentParser:
     batch.add_argument("--records", type=Path, default=Path("artifacts/v2-runs.jsonl"))
     batch.add_argument("--render-dir", type=Path, default=Path("cache/v2-pages"))
     batch.add_argument("--limit", type=int, default=None)
+
+    audit = subparsers.add_parser("audit-run", help="audit records and prediction coverage")
+    audit.add_argument("--records", required=True, type=Path)
+    audit.add_argument("--predictions", required=True, type=Path)
+    audit.add_argument("--output", required=True, type=Path)
+
+    split = subparsers.add_parser("create-split", help="create a document-level dev/holdout split")
+    split.add_argument("--samples", required=True, type=Path)
+    split.add_argument("--exposed-records", type=Path, default=None)
+    split.add_argument("--output", required=True, type=Path)
+    split.add_argument("--seed", default="mmlongbench-doc-v2-harness-v1")
+
+    compare = subparsers.add_parser("compare-runs", help="compare paired scored runs")
+    compare.add_argument("--runs", required=True, nargs="+", type=Path)
+    compare.add_argument("--output", required=True, type=Path)
+
+    score = subparsers.add_parser("score-run", help="validate a pre-judged run")
+    score.add_argument("--run-dir", required=True, type=Path)
+    score.add_argument("--samples", required=True, type=Path)
+    score.add_argument("--output", required=True, type=Path)
+
+    index = subparsers.add_parser(
+        "build-index", help="render documents and build Qwen3-VL page indexes"
+    )
+    index.add_argument("--config", type=Path, default=Path("configs/experiments/retrieval.toml"))
+    index.add_argument("--documents", type=Path, default=Path("data/documents"))
+    index.add_argument("--render-dir", type=Path, default=Path("cache/v2-pages"))
+    index.add_argument("--output", type=Path, default=Path("artifacts/index"))
+    index.add_argument("--models-dir", type=Path, default=Path("models"))
+    index.add_argument("--document-id", action="append", dest="document_ids")
+
+    staged = subparsers.add_parser(
+        "run-pipeline", help="run the phased embedding/reranking/OCR/answer harness"
+    )
+    staged.add_argument("--config", type=Path, default=Path("configs/experiments/expanded.toml"))
+    staged.add_argument(
+        "--samples", type=Path, default=Path("benchmark/mmlongbench-doc-v2/data/samples.json")
+    )
+    staged.add_argument("--documents", type=Path, default=Path("data/documents"))
+    staged.add_argument("--render-dir", type=Path, default=Path("cache/v2-pages"))
+    staged.add_argument("--index-manifest", type=Path, default=None)
+    staged.add_argument("--run-dir", type=Path, required=True)
+    staged.add_argument("--models-dir", type=Path, default=Path("models"))
+    staged.add_argument("--limit", type=int, default=None)
     return parser
 
 
@@ -159,6 +256,100 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "export-v2":
         export_v2_from_files(args.samples, args.predictions, args.output)
+        return 0
+    if args.command == "audit-run":
+        result = audit_records(args.records, args.predictions)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+        print(f"wrote audit to {args.output}")
+        return 0
+    if args.command == "create-split":
+        exposed = set()
+        if args.exposed_records is not None:
+            exposed.update(_read_exposed_keys(args.exposed_records))
+        result = create_document_split(args.samples, exposed, args.seed)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+        print(f"wrote split to {args.output}")
+        return 0
+    if args.command == "compare-runs":
+        write_report(compare_runs(args.runs), args.output)
+        print(f"wrote comparison to {args.output}")
+        return 0
+    if args.command == "score-run":
+        result = score_run(args.run_dir, args.samples)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+        print(f"{result['status']}: wrote score report to {args.output}")
+        return 0
+    if args.command == "build-index":
+        config = load_config(args.config)
+        manifest = build_indexes(
+            config,
+            args.documents,
+            args.render_dir,
+            args.output,
+            models_dir=args.models_dir,
+            document_ids=args.document_ids,
+        )
+        print(f"wrote index manifest to {manifest}")
+        return 0
+    if args.command == "run-pipeline":
+        config = load_config(args.config)
+        run_dir = Path(args.run_dir)
+        if run_dir.exists() and any(run_dir.iterdir()):
+            raise SystemExit(
+                f"run directory is not empty: {run_dir}; choose a fresh run directory"
+            )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        index_manifest = args.index_manifest
+        if index_manifest is None:
+            index_manifest = build_indexes(
+                config,
+                args.documents,
+                args.render_dir,
+                run_dir / "index",
+                models_dir=args.models_dir,
+            )
+        stage_dir = run_dir / "stages"
+        retrieval_path = retrieve_questions(
+            config,
+            args.samples,
+            index_manifest,
+            stage_dir / "retrieval.jsonl",
+            models_dir=args.models_dir,
+            limit=args.limit,
+        )
+        reranked_path = rerank_questions(
+            config,
+            retrieval_path,
+            index_manifest,
+            stage_dir / "reranked",
+            models_dir=args.models_dir,
+        )
+        ocr_path = ocr_questions(
+            config,
+            reranked_path,
+            index_manifest,
+            stage_dir / "ocr",
+            models_dir=args.models_dir,
+        )
+        answer_questions(
+            config,
+            args.samples,
+            ocr_path,
+            index_manifest,
+            run_dir,
+            models_dir=args.models_dir,
+        )
+        manifest = build_run_manifest(
+            config,
+            run_id=run_dir.name,
+            samples_path=args.samples,
+            index_manifest=index_manifest,
+        )
+        _write_cli_json(run_dir / "manifest.json", manifest.model_dump(mode="json"))
+        print(f"wrote staged run to {run_dir}")
         return 0
     if args.command == "gpu-smoke":
         config = load_config(args.config)

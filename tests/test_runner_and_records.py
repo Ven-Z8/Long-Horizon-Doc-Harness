@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from doc_harness.contracts import DraftAnswer, ModelRequest, RunRecord
 from doc_harness.records import read_run_records, write_run_record
 from doc_harness.runner import FakeRunner, parse_draft_answer
@@ -59,6 +61,6 @@ def test_parse_draft_answer_skips_evidence_only_object():
     assert draft.answer == "100"
 
 
-def test_parse_draft_answer_preserves_non_json_prose():
-    draft = parse_draft_answer("The answer is Less well-off.")
-    assert draft.answer == "The answer is Less well-off."
+def test_parse_draft_answer_rejects_non_json_prose():
+    with pytest.raises(ValueError, match="valid DraftAnswer"):
+        parse_draft_answer("The answer is Less well-off.")
