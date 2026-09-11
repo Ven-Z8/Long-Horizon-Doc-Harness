@@ -1,0 +1,5 @@
+Plan the evidence search for this question. Do not answer it.
+Choose local for a bounded fact or quantity; cross_page when facts from different locations must be combined; exhaustive only when the question requires enumerating the document or establishing a whole-document claim. “How much” alone is not exhaustive.
+Return one to three concise retrieval queries preserving entities, dates, units, and requested relationships. Do not invent page IDs. List necessary operations and evidence needed to complete them.
+Question: $question
+Output schema: $schema

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -69,3 +70,41 @@ def create_document_split(
             "holdout_samples": len(holdout_keys),
         },
     }
+
+
+def prepare_phase2_selection(
+    samples_path: Path, baseline_run: Path, output_dir: Path, *, limit: int = 100
+) -> dict[str, Path]:
+    """Freeze the baseline question order into development and smoke files."""
+
+    samples = json.loads(Path(samples_path).read_text(encoding="utf-8"))
+    if not isinstance(samples, list):
+        raise ValueError("samples JSON must be a list")
+    by_key = {(str(row["doc_id"]), normalize_question(str(row["question"]))): row for row in samples}
+    baseline_dir = Path(baseline_run)
+    selected_path = baseline_dir / "selected-samples.json"
+    if selected_path.exists():
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    else:
+        selected = json.loads((baseline_dir / "predictions.json").read_text(encoding="utf-8"))
+    if not isinstance(selected, list) or len(selected) != limit:
+        raise ValueError(f"baseline must contain exactly {limit} selected questions")
+    keys = [(str(item.get("doc_id")), normalize_question(str(item.get("question", "")))) for item in selected]
+    missing = [key for key in keys if key not in by_key]
+    if missing:
+        raise ValueError(f"unknown baseline question: {missing[0]}")
+    if len(set(keys)) != len(keys):
+        raise ValueError("baseline selected questions contain duplicates")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=False)
+    dev_rows = [by_key[key] for key in keys]
+    smoke_rows = dev_rows[: min(20, len(dev_rows))]
+    selection_rows = [{"doc_id": key[0], "question": key[1]} for key in keys]
+    paths = {
+        "dev": output_dir / "dev100.json",
+        "smoke": output_dir / "smoke20.json",
+        "selection": output_dir / "dev100-selection.json",
+    }
+    for path, payload in ((paths["dev"], dev_rows), (paths["smoke"], smoke_rows), (paths["selection"], selection_rows)):
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return paths

@@ -1,0 +1,6 @@
+Answer only from the supplied document pages. Use a null answer when the supplied evidence does not support an answer. Return the supplied schema.
+Question: $question
+Search plan: $plan
+Coverage: $coverage
+Evidence: $evidence
+Output schema: $schema

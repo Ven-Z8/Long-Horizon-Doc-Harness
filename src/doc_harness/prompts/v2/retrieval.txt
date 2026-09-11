@@ -1,0 +1,1 @@
+Retrieve document pages containing evidence needed to answer the question, including relevant text, tables, charts, figures, labels, and units.

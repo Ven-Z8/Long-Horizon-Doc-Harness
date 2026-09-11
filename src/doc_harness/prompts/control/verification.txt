@@ -1,0 +1,6 @@
+Check whether the draft is supported by the supplied evidence.
+Question: $question
+Draft: $draft
+Coverage: $coverage
+Evidence: $evidence
+Output schema: $schema

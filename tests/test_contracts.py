@@ -21,3 +21,12 @@ def test_evidence_span_and_failure_are_typed():
                            message="missing PDF", retryable=False)
     assert span.page_id == 0
     assert failure.retryable is False
+
+
+def test_visual_evidence_can_use_a_locator_without_an_ocr_quote():
+    draft = DraftAnswer(
+        answer="12%",
+        evidence=[EvidenceSpan(page_id=2, kind="visual", locator="blue bar")],
+        insufficient_evidence=False,
+    )
+    assert draft.evidence[0].quote is None

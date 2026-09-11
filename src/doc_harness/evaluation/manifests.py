@@ -39,6 +39,7 @@ class RunManifest(StrictModel):
     models_hash: str = Field(min_length=1)
     prompts_hash: str = Field(min_length=1)
     dependencies_hash: str = Field(min_length=1)
+    selected_keys_hash: str = "unknown"
 
 
 RESUME_IDENTITY_FIELDS: tuple[str, ...] = (
@@ -50,6 +51,7 @@ RESUME_IDENTITY_FIELDS: tuple[str, ...] = (
     "models_hash",
     "prompts_hash",
     "dependencies_hash",
+    "selected_keys_hash",
 )
 
 

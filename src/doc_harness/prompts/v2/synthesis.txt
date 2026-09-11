@@ -1,0 +1,7 @@
+Combine the supplied verified, source-linked findings to answer the question. Each finding applies only to its cited evidence. Resolve units and time periods before combining numbers.
+For lists or counts, distinguish repeated mentions of one item from distinct items and preserve references for each item. Do not count missing or unreadable sections as zero. If findings conflict, require source reinspection instead of choosing the most convenient value. Exhaustive answers require complete recorded scope.
+Return a concise answer with citations drawn only from supplied findings, or a null answer if they do not establish it. Do not invent unseen pages.
+Question: $question
+Coverage: $coverage
+Verified findings with source references: $evidence
+Output schema: $schema

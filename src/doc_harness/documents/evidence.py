@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
@@ -121,7 +122,11 @@ class EvidenceImage(StrictModel):
         if self.region is None and self.pixel_count != self.width * self.height:
             raise ValueError("full-page pixel count is inconsistent with dimensions")
         if self.region is not None:
-            expected = max(1, math.ceil(self.width * self.height * self.region.area))
+            expected = (
+                self.width * self.height
+                if self.source_render_sha256 is not None
+                else max(1, math.ceil(self.width * self.height * self.region.area))
+            )
             if self.pixel_count != expected:
                 raise ValueError("crop pixel count is inconsistent with region bounds")
         return self
@@ -314,8 +319,13 @@ def build_bundle(
         for region in page_regions:
             if region is not None and region.page_id != page.page_id:
                 raise ValueError("crop region page_id does not match page")
+            image_page = page
+            if region is not None:
+                from .rendering import materialize_region
+
+                image_page = materialize_region(page, region, Path(page.image_path).parent / "regions")
             area = region.area if region is not None else 1.0
-            pixels = max(1, math.ceil(page.width * page.height * area))
+            pixels = max(1, image_page.width * image_page.height)
             if pixels > budget.max_pixels_per_image:
                 omissions.append(
                     EvidenceOmission(page_id=page.page_id, item="image", reason="per_image_pixel_budget")
@@ -330,15 +340,15 @@ def build_bundle(
                 EvidenceImage(
                     document_id=document_id,
                     page_id=page.page_id,
-                    image_path=page.image_path,
-                    render_sha256=page.render_sha256,
-                    width=page.width,
-                    height=page.height,
+                    image_path=image_page.image_path,
+                    render_sha256=image_page.render_sha256,
+                    width=image_page.width,
+                    height=image_page.height,
                     pixel_count=pixels,
                     region=region,
                     label=f"page_id={page.page_id}",
-                    source_render_sha256=page.source_render_sha256,
-                    source_image_path=page.source_image_path,
+                    source_render_sha256=image_page.source_render_sha256,
+                    source_image_path=image_page.source_image_path,
                 )
             )
             if region is not None:
@@ -356,9 +366,9 @@ def build_bundle(
         provenance[page.page_id] = EvidenceProvenance(
             document_id=document_id,
             page_id=page.page_id,
-            render_sha256=page.source_render_sha256 or page.render_sha256,
-            image_path=page.image_path,
-            source_image_path=page.source_image_path or page.image_path,
+                    render_sha256=image_page.source_render_sha256 or page.render_sha256,
+                    image_path=image_page.image_path,
+                    source_image_path=image_page.source_image_path or page.image_path,
             parser_model=_parsed_value(parser_item, "parser_model") if parser_item is not None else None,
             parser_revision=_parsed_value(parser_item, "parser_revision") if parser_item is not None else None,
             prompt_version=_parsed_value(parser_item, "prompt_version") if parser_item is not None else None,
@@ -367,7 +377,7 @@ def build_bundle(
                 _status(parser_item).value if parser_item is not None else None
             ),
             focused_render_sha256=(
-                page.render_sha256 if page.source_render_sha256 is not None else None
+                image_page.render_sha256 if image_page.source_render_sha256 is not None else None
             ),
         )
 

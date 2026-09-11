@@ -1,0 +1,1 @@
+Transcribe this page faithfully as markdown. Preserve headings, reading order, table row and column relationships, captions, units, footnotes, and visible chart labels and legends. Mark unreadable text as [illegible]. Do not infer values from plotted shapes, summarize the page, or answer any question.

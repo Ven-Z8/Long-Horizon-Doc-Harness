@@ -45,7 +45,17 @@ class ParsedPage(StrictModel):
 
 class EvidenceSpan(StrictModel):
     page_id: int = Field(ge=0)
-    quote: str = Field(min_length=1)
+    kind: Literal["text", "visual"] = "text"
+    quote: str | None = Field(default=None, min_length=1)
+    locator: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def source_description_required(self) -> "EvidenceSpan":
+        if self.kind == "text" and not self.quote:
+            raise ValueError("text evidence requires a quote")
+        if self.kind == "visual" and not self.locator:
+            raise ValueError("visual evidence requires a locator")
+        return self
 
 
 class DraftAnswer(StrictModel):

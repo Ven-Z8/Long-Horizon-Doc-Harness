@@ -1,0 +1,4 @@
+Return a complete response matching the supplied schema.
+Validation problem: $validation_error
+Previous response: $draft
+Output schema: $schema

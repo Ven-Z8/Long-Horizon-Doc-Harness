@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..core.contracts import Page
+from .evidence import EvidenceRegion
 
 
 def validate_pages(pages: Sequence[Page]) -> None:
@@ -108,6 +109,46 @@ def resize_page_for_budget(page: Page, max_pixels: int, output_dir: Path) -> Pag
             "image_path": str(target),
             "width": width,
             "height": height,
+            "render_sha256": digest,
+            "source_render_sha256": page.source_render_sha256 or page.render_sha256,
+            "source_image_path": page.source_image_path or page.image_path,
+        }
+    )
+
+
+def materialize_region(page: Page, region: EvidenceRegion, output_dir: Path) -> Page:
+    """Create a real pixel crop while retaining the source page identity."""
+
+    if region.page_id != page.page_id:
+        raise ValueError("region page_id does not match page")
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - optional PDF/image extra
+        raise RuntimeError("region rendering requires Pillow; install the pdf extra") from exc
+    source = Path(page.image_path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    with Image.open(source).convert("RGB") as image:
+        width, height = image.size
+        left = int(round(region.x0 * width))
+        top = int(round(region.y0 * height))
+        right = int(round(region.x1 * width))
+        bottom = int(round(region.y1 * height))
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise ValueError("region coordinates do not produce a valid crop")
+        cropped = image.crop((left, top, right, bottom))
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        seed = f"{page.render_sha256}:{region.model_dump_json()}".encode("utf-8")
+        stem = hashlib.sha256(seed).hexdigest()[:24]
+        target = output_dir / f"{page.document_id.replace('/', '_')}-page-{page.page_id:04d}-{stem}.png"
+        cropped.save(target, format="PNG", optimize=False)
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    return page.model_copy(
+        update={
+            "image_path": str(target),
+            "width": right - left,
+            "height": bottom - top,
             "render_sha256": digest,
             "source_render_sha256": page.source_render_sha256 or page.render_sha256,
             "source_image_path": page.source_image_path or page.image_path,

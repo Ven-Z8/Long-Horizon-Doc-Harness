@@ -20,12 +20,16 @@ from typing import Any, Iterable, Mapping, Sequence
 from .batch import BASELINE_PROMPT, load_v2_samples
 from ..core.config import HarnessConfig
 from ..core.contracts import (
+    DraftAnswer,
     ModelRequest,
     Prediction,
     RunRecord,
     SafeQuestion,
+    StageFailure,
     Status,
 )
+from ..core.answers import QuestionOutcome
+from ..core.answers import AnswerDraftV2, VerificationReportV2
 from ..documents.evidence import EvidenceBudget, EvidenceBundle, build_bundle
 from ..evaluation.manifests import RunManifest, sha256_file
 from ..documents.ocr import OCRParsedPage, QianfanOCRParser, parse_cached
@@ -33,6 +37,8 @@ from .planning import SearchState, expand_evidence, plan_question
 from ..core.protocol import export_v2_predictions, normalize_question
 from ..documents.rendering import render_pdf, resize_page_for_budget
 from ..models.reranking import (
+    SelectionEntry,
+    SelectionManifest,
     QwenPageReranker,
     read_selection_manifest,
     select_page_manifest,
@@ -44,7 +50,10 @@ from ..models.retrieval import (
     Qwen3VLPageEmbedder,
 )
 from ..models.runner import QwenTransformersRunner
-from .verification import verify_answer
+from ..models.structured import RawAttempt, StructuredCall
+from ..prompts.registry import prompt_inventory, render_prompt
+from .verification import verify_answer, verify_v2
+from .checkpoints import commit_question, load_committed, sample_key
 
 
 SCHEMA_VERSION = 1
@@ -53,6 +62,68 @@ SCHEMA_VERSION = 1
 def _canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def required_ocr_pages(windows: Mapping[str, Sequence[Any]]) -> list[Any]:
+    """Return unique document/page assets requested by current evidence windows."""
+
+    result: dict[tuple[str, int], Any] = {}
+    for window in windows.values():
+        for page in window:
+            key = (str(page.document_id), int(page.page_id))
+            existing = result.get(key)
+            if existing is not None and getattr(existing, "render_sha256", None) != getattr(page, "render_sha256", None):
+                raise ValueError(f"page identity has conflicting renders: {key}")
+            result[key] = page
+    return [result[key] for key in sorted(result)]
+
+
+def outcome_for_generation(
+    *,
+    response: str | None,
+    generation_failed: bool,
+    verification_abstained: bool,
+    reason: str = "",
+) -> QuestionOutcome:
+    """Map a final stage state to an operationally explicit outcome."""
+
+    reason = reason[:480]
+    if generation_failed:
+        return QuestionOutcome(kind="failed", answer=None, reason=reason or "structured generation failed")
+    if verification_abstained:
+        return QuestionOutcome(kind="search_exhausted", answer=None, reason=reason or "evidence search exhausted")
+    if response is None or response == "Not answerable":
+        return QuestionOutcome(kind="unanswerable", answer=None, reason=reason or "document evidence is insufficient")
+    return QuestionOutcome(kind="answered", answer=response, reason=reason or "answer generated")
+
+
+def prompt_set_for(config: HarnessConfig, role: str) -> str:
+    """Resolve a role-specific prompt override and keep it in run identity."""
+
+    return config.prompts.overrides.get(role, config.prompts.set)
+
+
+def _legacy_verification_from_v2(report: VerificationReportV2) -> Any:
+    """Adapt the semantic verifier result to the historical stage contract."""
+
+    from ..core.contracts import EvidenceSpan, Verification, VerifyDecision
+
+    decision = VerifyDecision.accept if report.verdict == "supported" else VerifyDecision.abstain
+    evidence = [
+        EvidenceSpan(
+            page_id=item.page_id,
+            kind=item.kind,
+            quote=item.quote,
+            locator=item.locator,
+        )
+        for item in report.evidence
+    ]
+    return Verification(
+        decision=decision,
+        final_answer=report.final_answer if decision is VerifyDecision.accept else None,
+        evidence=evidence if decision is VerifyDecision.accept else [],
+        reason=report.reason,
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -177,12 +248,14 @@ def build_indexes(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = _document_paths(documents_dir, document_ids)
     checkpoint = resolve_checkpoint(config.retrieval.embedding_model_id, models_dir)
+    retrieval_instruction = render_prompt("retrieval", prompt_set_for(config, "retrieval"), {})
     embedder = Qwen3VLPageEmbedder(
         checkpoint,
         model_revision=config.retrieval.embedding_revision,
         model_id=config.retrieval.embedding_model_id,
         batch_size=config.retrieval.embedding_batch_size,
         max_pixels=config.render.max_pixels,
+        instruction=retrieval_instruction,
     )
     entries: list[dict[str, Any]] = []
     try:
@@ -266,12 +339,14 @@ def retrieve_questions(
         raise ValueError("limit must be positive")
     indexes = _index_by_document(index_manifest)
     checkpoint = resolve_checkpoint(config.retrieval.embedding_model_id, models_dir)
+    retrieval_instruction = render_prompt("retrieval", prompt_set_for(config, "retrieval"), {})
     embedder = Qwen3VLPageEmbedder(
         checkpoint,
         model_revision=config.retrieval.embedding_revision,
         model_id=config.retrieval.embedding_model_id,
         batch_size=config.retrieval.embedding_batch_size,
         max_pixels=config.render.max_pixels,
+        instruction=retrieval_instruction,
     )
     rows: list[dict[str, Any]] = []
     try:
@@ -314,12 +389,15 @@ def rerank_questions(
     if not config.retrieval.enabled:
         raise ValueError("retrieval must be enabled for the reranking phase")
     indexes = _index_by_document(index_manifest)
-    checkpoint = resolve_checkpoint(config.retrieval.reranker_model_id, models_dir)
-    reranker = QwenPageReranker(
-        checkpoint,
-        model_revision=config.retrieval.reranker_revision,
-        model_id=config.retrieval.reranker_model_id,
-    )
+    reranker = None
+    if config.retrieval.rerank_enabled:
+        checkpoint = resolve_checkpoint(config.retrieval.reranker_model_id, models_dir)
+        reranker = QwenPageReranker(
+            checkpoint,
+            model_revision=config.retrieval.reranker_revision,
+            model_id=config.retrieval.reranker_model_id,
+            instruction=render_prompt("reranking", prompt_set_for(config, "reranking"), {}),
+        )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
@@ -330,14 +408,42 @@ def rerank_questions(
             index = indexes.get(doc_id)
             if index is None:
                 raise FileNotFoundError(f"no page index for {doc_id}")
-            manifest = select_page_manifest(
-                question,
-                index,
-                reranker,
-                candidate_k=config.retrieval.candidate_k,
-                selected_k=config.retrieval.selected_k,
-                query_vector=row.get("query_vector"),
-            )
+            if reranker is not None:
+                manifest = select_page_manifest(
+                    question,
+                    index,
+                    reranker,
+                    candidate_k=config.retrieval.candidate_k,
+                    selected_k=config.retrieval.selected_k,
+                    query_vector=row.get("query_vector"),
+                )
+            else:
+                candidates = [
+                    item for item in index.search(
+                        row.get("query_vector"),
+                        config.retrieval.candidate_k,
+                        document_id=doc_id,
+                    )
+                ]
+                entries = [
+                    SelectionEntry(
+                        page_id=item.page_id,
+                        retrieval_score=item.score,
+                        retrieval_rank=item.rank,
+                        rerank_score=item.score,
+                        rerank_rank=item.rank,
+                    )
+                    for item in candidates
+                ]
+                manifest = SelectionManifest(
+                    document_id=doc_id,
+                    question=question.question,
+                    index_fingerprint=index.fingerprint,
+                    candidate_k=config.retrieval.candidate_k,
+                    selected_k=config.retrieval.selected_k,
+                    candidates=entries,
+                    selected=entries[: config.retrieval.selected_k],
+                )
             manifest_path = output_dir / f"{_canonical_hash([doc_id, question.question])}.json"
             write_selection_manifest(manifest, manifest_path)
             rows.append(
@@ -369,28 +475,40 @@ def ocr_questions(
         raise ValueError("OCR must be enabled for the OCR phase")
     indexes = _index_by_document(index_manifest)
     checkpoint = resolve_checkpoint(config.ocr.model_id, models_dir)
+    ocr_prompt = render_prompt("ocr", prompt_set_for(config, "ocr"), {})
     parser = QianfanOCRParser.from_pretrained(
         model_id=str(checkpoint),
         revision=config.ocr.revision,
         prompt_version=config.ocr.prompt_version,
         max_new_tokens=config.ocr.max_new_tokens,
-        ocr_config_hash=_canonical_hash(config.ocr.model_dump(mode="json")),
+        ocr_config_hash=_canonical_hash({"config": config.ocr.model_dump(mode="json"), "prompt": ocr_prompt}),
+        prompt_text=ocr_prompt,
     )
     cache_dir = Path(config.paths.cache_dir) / "ocr"
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     source_rows = _read_jsonl(reranked_path)
     needed: dict[tuple[str, int], Any] = {}
+    requested_by_row: list[tuple[dict[str, Any], Any, list[int]]] = []
     for row in source_rows:
         manifest = read_selection_manifest(Path(row["manifest_path"]))
         index = indexes.get(manifest.document_id)
         if index is None:
             raise FileNotFoundError(f"no page index for {manifest.document_id}")
         pages = {page.page_id: page for page in index.pages}
-        for entry in manifest.selected:
-            page = pages.get(entry.page_id)
+        plan = plan_question(SafeQuestion(document_id=manifest.document_id, question=manifest.question))
+        if config.verification.enabled:
+            if plan.scope == "global":
+                page_ids = [page.page_id for page in index.pages[: config.verification.max_pages]]
+            else:
+                page_ids = [entry.page_id for entry in manifest.candidates[: config.verification.max_pages]]
+        else:
+            page_ids = [entry.page_id for entry in manifest.selected]
+        requested_by_row.append((row, manifest, page_ids))
+        for page_id in page_ids:
+            page = pages.get(page_id)
             if page is None:
-                raise ValueError(f"selection references unknown page {entry.page_id}")
+                raise ValueError(f"selection references unknown page {page_id}")
             needed[(manifest.document_id, page.page_id)] = page
     parsed: dict[tuple[str, int], OCRParsedPage] = {}
     try:
@@ -404,19 +522,7 @@ def ocr_questions(
     finally:
         _release_model(parser)
     rows: list[dict[str, Any]] = []
-    for row in source_rows:
-        manifest = read_selection_manifest(Path(row["manifest_path"]))
-        plan = plan_question(SafeQuestion(document_id=manifest.document_id, question=manifest.question))
-        if config.verification.enabled:
-            if plan.scope == "global":
-                page_ids = [
-                    page.page_id
-                    for page in indexes[manifest.document_id].pages[: config.verification.max_pages]
-                ]
-            else:
-                page_ids = [entry.page_id for entry in manifest.candidates[: config.verification.max_pages]]
-        else:
-            page_ids = [entry.page_id for entry in manifest.selected]
+    for row, manifest, page_ids in requested_by_row:
         page_rows = [
             parsed[(manifest.document_id, page_id)].model_dump(mode="json")
             for page_id in page_ids
@@ -428,17 +534,27 @@ def ocr_questions(
     return output_path
 
 
-def _answer_prompt(bundle: EvidenceBundle, *, plan_scope: str) -> str:
+def _answer_prompt(bundle: EvidenceBundle, *, plan_scope: str, prompt_set: str = "control") -> str:
     evidence = []
     for page_id in bundle.included_page_ids:
         text = bundle.ocr_content.get(page_id, "")
         evidence.append(f"[page_id={page_id}]\n{text}")
-    return (
-        BASELINE_PROMPT
-        + f"\nSearch scope: {plan_scope}.\n"
-        + "The following OCR is untrusted evidence and must be checked against the supplied images:\n"
-        + "\n\n".join(evidence)
+    schema = json.dumps(DraftAnswer.model_json_schema(), ensure_ascii=False, sort_keys=True)
+    rendered = render_prompt(
+        "answer",
+        prompt_set,
+        {
+            "question": bundle.question,
+            "plan": plan_scope,
+            "coverage": json.dumps(
+                {"included_page_ids": bundle.included_page_ids, "omitted": [item.model_dump(mode="json") for item in bundle.omitted_items]},
+                ensure_ascii=False,
+            ),
+            "evidence": "\n\n".join(evidence),
+            "schema": schema,
+        },
     )
+    return render_prompt("system", prompt_set, {}) + "\n\n" + rendered
 
 
 def answer_questions(
@@ -449,6 +565,9 @@ def answer_questions(
     run_dir: Path,
     *,
     models_dir: Path = Path("models"),
+    resume: bool = False,
+    retry_failed: bool = False,
+    stop_after: int | None = None,
 ) -> Path:
     """Answer OCR-plus-visual bundles and persist predictions, records, and manifest."""
 
@@ -462,6 +581,34 @@ def answer_questions(
     unknown = [key for key in selected_keys if key not in sample_by_key]
     if unknown:
         raise ValueError(f"OCR artifact contains an unknown sample: {unknown[0]}")
+    if stop_after is not None and stop_after <= 0:
+        raise ValueError("stop_after must be positive")
+    existing_predictions: dict[tuple[str, str], Prediction] = {}
+    existing_records: list[RunRecord] = []
+    committed = load_committed(run_dir) if resume else {}
+    if resume and (Path(run_dir) / "predictions.json").exists():
+        existing_payload = json.loads((Path(run_dir) / "predictions.json").read_text(encoding="utf-8"))
+        for item in existing_payload:
+            prediction = Prediction.model_validate(item)
+            existing_predictions[(prediction.doc_id, normalize_question(prediction.question))] = prediction
+    if resume and (Path(run_dir) / "records.jsonl").exists():
+        existing_records = [RunRecord.model_validate(item) for item in _read_jsonl(Path(run_dir) / "records.jsonl")]
+    pending_rows = []
+    for row in rows:
+        key = sample_key(str(row["doc_id"]), str(row["question"]))
+        saved = committed.get(key)
+        if saved is None:
+            pending_rows.append(row)
+            continue
+        kind = str(saved.get("outcome", {}).get("kind", ""))
+        if kind == "failed" and retry_failed:
+            pending_rows.append(row)
+    if resume and not pending_rows:
+        destination = Path(run_dir) / "predictions.json"
+        if existing_predictions:
+            _write_json(destination, [item.model_dump(mode="json") for item in existing_predictions.values()])
+        return destination
+    rows = pending_rows if resume else rows
     checkpoint = resolve_checkpoint(config.model.model_id, models_dir)
     runner = QwenTransformersRunner.from_pretrained(
         str(checkpoint),
@@ -472,10 +619,13 @@ def answer_questions(
     )
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    predictions: list[Prediction] = []
-    records: list[RunRecord] = []
+    predictions_by_key = dict(existing_predictions)
+    records: list[RunRecord] = list(existing_records)
+    finalized_this_call = 0
     try:
         for row in rows:
+            if stop_after is not None and finalized_this_call >= stop_after:
+                break
             started = time.perf_counter()
             doc_id = str(row["doc_id"])
             question_text = normalize_question(str(row["question"]))
@@ -522,23 +672,133 @@ def answer_questions(
                     evidence_budget,
                 )
 
-            def generate_for(bundle: EvidenceBundle):
+            def generate_for(bundle: EvidenceBundle, prompt_override: str | None = None):
                 request = ModelRequest(
                     document_id=doc_id,
                     question=question_text,
                     page_ids=bundle.included_page_ids,
                     image_paths=[image.image_path for image in bundle.images],
-                    prompt=_answer_prompt(bundle, plan_scope=plan.scope),
+                    prompt=prompt_override
+                    or _answer_prompt(bundle, plan_scope=plan.scope, prompt_set=prompt_set_for(config, "answer")),
                     config_hash=config.effective_hash(),
                 )
                 return runner.generate(request)
 
+            def verify_bundle(draft: Any, bundle: EvidenceBundle):
+                if config.verification.mode != "model":
+                    return verify_answer(safe_question, draft, bundle)
+                from ..core.answers import EvidenceRefV2
+
+                draft_v2 = AnswerDraftV2(
+                    answer=draft.answer,
+                    evidence=[
+                        EvidenceRefV2(page_id=item.page_id, kind="text", quote=item.quote)
+                        for item in draft.evidence
+                    ],
+                    insufficient_evidence=draft.insufficient_evidence,
+                )
+
+                def call_verifier(request: ModelRequest) -> StructuredCall:
+                    try:
+                        request_data = json.loads(request.prompt)
+                    except json.JSONDecodeError as exc:
+                        return StructuredCall(
+                            attempts=[],
+                            failure=StageFailure(
+                                stage="verification",
+                                error_type="JSONDecodeError",
+                                message=str(exc),
+                                retryable=False,
+                            ),
+                        )
+                    evidence = "\n\n".join(
+                        f"[page_id={page_id}]\n{bundle.ocr_content.get(page_id, '')}"
+                        for page_id in bundle.included_page_ids
+                    )
+                    prompt = render_prompt(
+                        "verification",
+                        prompt_set_for(config, "verification"),
+                        {
+                            "question": request.question,
+                            "draft": json.dumps(request_data.get("draft", {}), ensure_ascii=False),
+                            "coverage": json.dumps(request_data.get("coverage", {}), ensure_ascii=False),
+                            "evidence": evidence,
+                            "schema": json.dumps(VerificationReportV2.model_json_schema(), ensure_ascii=False),
+                        },
+                    )
+                    raw_result = runner.generate(
+                        request.model_copy(
+                            update={
+                                "prompt": render_prompt("system", prompt_set_for(config, "verification"), {})
+                                + "\n\n"
+                                + prompt
+                            }
+                        )
+                    )
+                    attempt = RawAttempt(
+                        raw_response=raw_result.raw_response,
+                        finish_reason=raw_result.finish_reason,
+                        input_tokens=raw_result.input_tokens,
+                        output_tokens=raw_result.output_tokens,
+                        failure=raw_result.failure,
+                    )
+                    if raw_result.finish_reason != "eos":
+                        return StructuredCall(attempts=[attempt], failure=StageFailure(
+                            stage="verification", error_type="IncompleteGeneration",
+                            message=f"generation ended with {raw_result.finish_reason}", retryable=True,
+                        ))
+                    try:
+                        text = raw_result.raw_response.strip()
+                        if text.startswith("```"):
+                            text = "\n".join(text.splitlines()[1:-1]).strip()
+                        payload = json.loads(text)
+                        report = VerificationReportV2.model_validate(payload)
+                    except Exception as exc:
+                        return StructuredCall(attempts=[attempt], failure=StageFailure(
+                            stage="verification", error_type=type(exc).__name__,
+                            message=str(exc), retryable=True,
+                        ))
+                    return StructuredCall(attempts=[attempt], payload=report.model_dump(mode="json"))
+
+                report = verify_v2(
+                    safe_question,
+                    draft_v2,
+                    bundle,
+                    call=call_verifier,
+                    coverage={
+                        "included_page_ids": bundle.included_page_ids,
+                        "complete": plan.scope != "global" or len(available_ids) >= len(index.pages),
+                    },
+                    config=config,
+                )
+                return _legacy_verification_from_v2(report)
+
             bundle = make_bundle(selected_ids)
-            generation = generate_for(bundle)
+            base_prompt = _answer_prompt(bundle, plan_scope=plan.scope, prompt_set=prompt_set_for(config, "answer"))
+            generation = generate_for(bundle, base_prompt)
+            generation_attempts = [generation]
+            if (
+                (generation.draft is None or generation.finish_reason != "eos")
+                and config.generation.schema_repair_attempts
+            ):
+                repair_prompt = render_prompt(
+                    "repair",
+                    prompt_set_for(config, "repair"),
+                    {
+                        "validation_error": generation.failure.message
+                        if generation.failure is not None
+                        else f"generation ended with {generation.finish_reason}",
+                        "draft": generation.raw_response[:4000],
+                        "schema": json.dumps(DraftAnswer.model_json_schema(), ensure_ascii=False, sort_keys=True),
+                    },
+                )
+                generation = generate_for(bundle, base_prompt + "\n\n" + repair_prompt)
+                generation_attempts.append(generation)
             verification = None
             expansion_trace: list[dict[str, Any]] = []
-            if generation.draft is not None and config.verification.enabled:
-                verification = verify_answer(safe_question, generation.draft, bundle)
+            generation_usable = generation.draft is not None and generation.finish_reason == "eos"
+            if generation_usable and config.verification.enabled:
+                verification = verify_bundle(generation.draft, bundle)
                 state = SearchState(
                     selected_page_ids=list(bundle.included_page_ids),
                     visited_page_ids=list(selected_ids),
@@ -549,27 +809,60 @@ def answer_questions(
                 )
                 while verification.decision.value == "abstain":
                     decision = expand_evidence(plan, state)
-                    expansion_trace.append(decision.model_dump(mode="json"))
                     if decision.terminal:
+                        expansion_trace.append(decision.model_dump(mode="json"))
                         break
+                    retained = state.selected_page_ids[: config.verification.retained_pages]
+                    capacity = max(0, evidence_budget.max_pages - len(retained))
+                    additional = decision.additional_page_ids[:capacity]
+                    if not additional:
+                        expansion_trace.append(
+                            {
+                                **decision.model_dump(mode="json"),
+                                "additional_page_ids": [],
+                                "terminal": True,
+                                "reason": "active_window_budget",
+                            }
+                        )
+                        break
+                    expansion_trace.append(
+                        decision.model_copy(update={"additional_page_ids": additional}).model_dump(mode="json")
+                    )
                     state = state.model_copy(
                         update={
-                            "selected_page_ids": list(
-                                dict.fromkeys(state.selected_page_ids + decision.additional_page_ids)
-                            ),
+                            "selected_page_ids": list(dict.fromkeys(retained + additional)),
                             "visited_page_ids": list(
-                                dict.fromkeys(state.visited_page_ids + decision.additional_page_ids)
+                                dict.fromkeys(state.visited_page_ids + additional)
                             ),
                             "expansion_round": state.expansion_round + 1,
                             "unresolved_evidence": True,
                         }
                     )
                     bundle = make_bundle(state.selected_page_ids)
-                    generation = generate_for(bundle)
+                    base_prompt = _answer_prompt(bundle, plan_scope=plan.scope, prompt_set=prompt_set_for(config, "answer"))
+                    generation = generate_for(bundle, base_prompt)
+                    generation_attempts.append(generation)
+                    if (
+                        (generation.draft is None or generation.finish_reason != "eos")
+                        and config.generation.schema_repair_attempts
+                    ):
+                        repair_prompt = render_prompt(
+                            "repair",
+                            prompt_set_for(config, "repair"),
+                            {
+                                "validation_error": generation.failure.message
+                                if generation.failure is not None
+                                else f"generation ended with {generation.finish_reason}",
+                                "draft": generation.raw_response[:4000],
+                                "schema": json.dumps(DraftAnswer.model_json_schema(), ensure_ascii=False, sort_keys=True),
+                            },
+                        )
+                        generation = generate_for(bundle, base_prompt + "\n\n" + repair_prompt)
+                        generation_attempts.append(generation)
                     if generation.draft is None:
                         verification = None
                         break
-                    verification = verify_answer(safe_question, generation.draft, bundle)
+                    verification = verify_bundle(generation.draft, bundle)
             if (
                 verification is not None
                 and plan.scope == "global"
@@ -586,19 +879,19 @@ def answer_questions(
                     evidence=[],
                     reason="global coverage is incomplete within the page budget",
                 )
-            if generation.draft is None:
-                response = generation.raw_response
+            if not generation_usable:
+                response = "Not answerable"
             elif verification is not None:
                 response = verification.final_answer or "Not answerable"
             else:
                 response = generation.draft.answer or "Not answerable"
-            predictions.append(Prediction(doc_id=doc_id, question=question_text, response=response))
-            records.append(
-                RunRecord(
+            prediction = Prediction(doc_id=doc_id, question=question_text, response=response)
+            predictions_by_key[(doc_id, question_text)] = prediction
+            record = RunRecord(
                     run_id=uuid.uuid4().hex,
                     document_id=doc_id,
                     question=question_text,
-                    status=Status.ok,
+                    status=Status.failed if not generation_usable else Status.ok,
                     response=response,
                     raw_response=generation.raw_response,
                     parse_status=generation.parse_status,
@@ -620,10 +913,44 @@ def answer_questions(
                         "coverage_complete": (
                             plan.scope != "global" or len(available_ids) >= len(index.pages)
                         ),
-                        "parsed_answer": generation.draft.answer if generation.draft else None,
+                        "parsed_answer": generation.draft.answer if generation_usable and generation.draft else None,
+                        "generation_attempts": [
+                            {
+                                "parse_status": attempt.parse_status,
+                                "finish_reason": attempt.finish_reason,
+                                "input_tokens": attempt.input_tokens,
+                                "output_tokens": attempt.output_tokens,
+                                "raw_response": attempt.raw_response,
+                                "failure": attempt.failure.model_dump(mode="json") if attempt.failure else None,
+                            }
+                            for attempt in generation_attempts
+                        ],
                     },
                 )
+            records.append(record)
+            outcome = outcome_for_generation(
+                response=response,
+                generation_failed=not generation_usable,
+                verification_abstained=(verification is not None and verification.decision.value == "abstain"),
+                reason=(
+                    generation.failure.message
+                    if generation.failure is not None
+                    else (verification.reason if verification is not None else "")
+                ),
             )
+            commit_question(
+                run_dir,
+                sample_key(doc_id, question_text),
+                {
+                    "document_id": doc_id,
+                    "question": question_text,
+                    "outcome": outcome.model_dump(mode="json"),
+                    "attempt_paths": [],
+                    "record_run_id": record.run_id,
+                },
+                allow_replace=retry_failed,
+            )
+            finalized_this_call += 1
     except Exception as exc:
         # A failure is attached to the question that was being processed.  The
         # caller can rerun after fixing the phase artifact without fabricating an
@@ -632,6 +959,7 @@ def answer_questions(
     finally:
         _release_model(runner)
 
+    predictions = list(predictions_by_key.values())
     _write_json(run_dir / "predictions.json", [item.model_dump(mode="json") for item in predictions])
     _write_jsonl(run_dir / "records.jsonl", [item.model_dump(mode="json") for item in records])
     _write_json(
@@ -654,7 +982,26 @@ def build_run_manifest(
     code_files = sorted(Path("src/doc_harness").rglob("*.py"))
     code_hash = _canonical_hash({str(path): sha256_file(path) for path in code_files})
     models_file = Path("models.lock")
-    dependencies = [path for path in (Path("pyproject.toml"), Path("uv.lock")) if path.is_file()]
+    dependencies = [
+        path
+        for path in (Path("pyproject.toml"), Path("uv.lock"), Path("environment.lock"))
+        if path.is_file()
+    ]
+    prompt_identity = {
+        "legacy_prompt": prompt,
+        "selected_set": config.prompts.set,
+        "overrides": config.prompts.overrides,
+        "inventory": {
+            role: prompt_inventory(prompt_set_for(config, role))
+            for role in ("system", "planning", "retrieval", "reranking", "ocr", "answer", "verification", "repair", "synthesis")
+        },
+    }
+    selected_keys_hash = _canonical_hash(
+        [
+            {"doc_id": sample.doc_id, "question": normalize_question(sample.question)}
+            for sample in load_v2_samples(samples_path)
+        ]
+    )
     return RunManifest(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
@@ -663,8 +1010,9 @@ def build_run_manifest(
         dataset_hash=sha256_file(index_manifest),
         samples_hash=sha256_file(samples_path),
         models_hash=sha256_file(models_file) if models_file.is_file() else "unknown",
-        prompts_hash=_canonical_hash(prompt),
+        prompts_hash=_canonical_hash(prompt_identity),
         dependencies_hash=_canonical_hash({str(path): sha256_file(path) for path in dependencies}),
+        selected_keys_hash=selected_keys_hash,
     )
 
 

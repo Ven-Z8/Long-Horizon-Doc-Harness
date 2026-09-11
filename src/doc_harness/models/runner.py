@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from ..core.contracts import (
     DraftAnswer,
@@ -19,6 +19,26 @@ from ..core.contracts import (
 class ModelRunner(Protocol):
     def run(self, request: ModelRequest) -> DraftAnswer:
         """Generate a structured answer for a safe model request."""
+
+
+def build_labeled_content(
+    page_ids: Sequence[int], images: Sequence[Any], text: str
+) -> list[dict[str, Any]]:
+    """Interleave explicit page labels and images before the request text."""
+
+    if len(page_ids) != len(images):
+        raise ValueError("page_ids and images must have matching lengths")
+    normalized_ids = [int(page_id) for page_id in page_ids]
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise ValueError("page IDs must be unique")
+    if any(page_id < 0 for page_id in normalized_ids):
+        raise ValueError("page IDs must be nonnegative")
+    content: list[dict[str, Any]] = []
+    for page_id, image in zip(normalized_ids, images, strict=True):
+        content.append({"type": "text", "text": f"Document page_id={page_id}"})
+        content.append({"type": "image", "image": image})
+    content.append({"type": "text", "text": text})
+    return content
 
 
 class FakeRunner:
@@ -135,8 +155,11 @@ class QwenTransformersRunner:
 
         images = [Image.open(Path(path)).convert("RGB") for path in request.image_paths]
         try:
-            content = [{"type": "image", "image": image} for image in images]
-            content.append({"type": "text", "text": f"{request.prompt}\n\nQuestion: {request.question}"})
+            content = build_labeled_content(
+                request.page_ids,
+                images,
+                f"{request.prompt}\n\nQuestion: {request.question}",
+            )
             messages = [{"role": "user", "content": content}]
             template_kwargs = {
                 "add_generation_prompt": True,

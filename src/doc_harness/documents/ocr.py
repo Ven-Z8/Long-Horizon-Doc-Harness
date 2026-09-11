@@ -370,6 +370,7 @@ class QianfanOCRParser:
         model_id: str = "baidu/Qianfan-OCR",
         revision: str = "623bf5d20d446abdb36606aa4547cd0c18886fe5",
         prompt_version: str = "qianfan-ocr-v1",
+        prompt_text: str | None = None,
         ocr_config_hash: str = "",
         max_new_tokens: int = 4096,
         do_sample: bool = False,
@@ -379,11 +380,13 @@ class QianfanOCRParser:
         self.parser_model = model_id
         self.parser_revision = revision
         self.prompt_version = prompt_version
+        self.prompt_text = prompt_text or "Transcribe this document page as faithful markdown. Preserve tables and layout."
         self.ocr_config_hash = ocr_config_hash or _sha256_json(
             {
                 "model_id": model_id,
                 "revision": revision,
                 "prompt_version": prompt_version,
+                "prompt_text": self.prompt_text,
                 "max_new_tokens": max_new_tokens,
                 "do_sample": do_sample,
             }
@@ -427,7 +430,7 @@ class QianfanOCRParser:
         except ImportError as exc:  # pragma: no cover - optional GPU integration
             raise RuntimeError("Qianfan OCR requires Pillow and torch") from exc
 
-        prompt = "Transcribe this document page as faithful markdown. Preserve tables and layout."
+        prompt = self.prompt_text
         image = Image.open(Path(page.image_path)).convert("RGB")
         try:
             messages = [

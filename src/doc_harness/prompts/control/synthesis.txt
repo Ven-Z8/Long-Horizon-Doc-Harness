@@ -1,0 +1,5 @@
+Answer from the supplied source-linked findings.
+Question: $question
+Coverage: $coverage
+Findings: $evidence
+Output schema: $schema

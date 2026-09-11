@@ -269,6 +269,32 @@ class PageEmbedder(Protocol):
         ...
 
 
+def fuse_rankings(
+    rankings: Sequence[Sequence[RankedPage]], *, top_k: int, rrf_k: int = 60
+) -> list[RankedPage]:
+    """Fuse independent query rankings with reciprocal rank fusion."""
+
+    if top_k <= 0 or rrf_k <= 0:
+        raise ValueError("top_k and rrf_k must be positive")
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        seen_pages: set[int] = set()
+        seen_ranks: set[int] = set()
+        for item in ranking:
+            if item.page_id in seen_pages:
+                raise ValueError("a query ranking contains duplicate pages")
+            if item.rank in seen_ranks:
+                raise ValueError("a query ranking contains duplicate ranks")
+            seen_pages.add(item.page_id)
+            seen_ranks.add(item.rank)
+            scores[item.page_id] = scores.get(item.page_id, 0.0) + 1.0 / (rrf_k + item.rank)
+    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:top_k]
+    return [
+        RankedPage(page_id=page_id, score=score, rank=rank, stage="rrf")
+        for rank, (page_id, score) in enumerate(ordered, 1)
+    ]
+
+
 class TransformersPageEmbedder:
     """Adapter for the bundled Qwen3-VL embedding implementation.
 

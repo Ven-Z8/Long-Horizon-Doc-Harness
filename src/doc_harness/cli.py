@@ -13,12 +13,13 @@ from .workflow.batch import run_v2_batch
 from .core.config import load_config
 from .core.contracts import BenchmarkSample, ModelRequest, Page, Prediction, RunRecord, StageFailure, Status
 from .evaluation.evaluation import score_run
+from .evaluation.judge_runner import judge_run
 from .evaluation.experiments import compare_runs, write_report
 from .evaluation.manifests import audit_records
 from .core.protocol import build_request, export_v2_predictions, validate_prediction_coverage
 from .core.records import read_run_records, write_run_record
 from .models.runner import FakeRunner, ModelRunner, QwenTransformersRunner
-from .evaluation.splits import create_document_split
+from .evaluation.splits import create_document_split, prepare_phase2_selection
 from .workflow.stages import (
     answer_questions,
     build_indexes,
@@ -27,6 +28,7 @@ from .workflow.stages import (
     rerank_questions,
     retrieve_questions,
 )
+from .workflow.coordinator import run_coordinator
 
 
 def _write_cli_json(path: Path, payload: object) -> None:
@@ -211,6 +213,11 @@ def _parser() -> argparse.ArgumentParser:
     split.add_argument("--output", required=True, type=Path)
     split.add_argument("--seed", default="mmlongbench-doc-v2-harness-v1")
 
+    prepare = subparsers.add_parser("prepare-phase2", help="freeze the phase-two development selection")
+    prepare.add_argument("--samples", required=True, type=Path)
+    prepare.add_argument("--baseline-run", required=True, type=Path)
+    prepare.add_argument("--output-dir", required=True, type=Path)
+
     compare = subparsers.add_parser("compare-runs", help="compare paired scored runs")
     compare.add_argument("--runs", required=True, nargs="+", type=Path)
     compare.add_argument("--output", required=True, type=Path)
@@ -219,6 +226,12 @@ def _parser() -> argparse.ArgumentParser:
     score.add_argument("--run-dir", required=True, type=Path)
     score.add_argument("--samples", required=True, type=Path)
     score.add_argument("--output", required=True, type=Path)
+
+    judge = subparsers.add_parser("judge-run", help="judge a complete run through OpenRouter")
+    judge.add_argument("--run-dir", required=True, type=Path)
+    judge.add_argument("--samples", required=True, type=Path)
+    judge.add_argument("--model", default="openai/gpt-5.6-luna")
+    judge.add_argument("--concurrency", type=int, default=4)
 
     index = subparsers.add_parser(
         "build-index", help="render documents and build Qwen3-VL page indexes"
@@ -243,6 +256,9 @@ def _parser() -> argparse.ArgumentParser:
     staged.add_argument("--run-dir", type=Path, required=True)
     staged.add_argument("--models-dir", type=Path, default=Path("models"))
     staged.add_argument("--limit", type=int, default=None)
+    staged.add_argument("--resume", action="store_true", help="resume committed question checkpoints")
+    staged.add_argument("--retry-failed", action="store_true", help="retry explicitly failed questions")
+    staged.add_argument("--stop-after", type=int, default=None, help="stop after N newly finalized questions")
     return parser
 
 
@@ -272,6 +288,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
         print(f"wrote split to {args.output}")
         return 0
+    if args.command == "prepare-phase2":
+        paths = prepare_phase2_selection(args.samples, args.baseline_run, args.output_dir)
+        print("wrote phase-two selections: " + ", ".join(str(path) for path in paths.values()))
+        return 0
     if args.command == "compare-runs":
         write_report(compare_runs(args.runs), args.output)
         print(f"wrote comparison to {args.output}")
@@ -281,6 +301,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
         print(f"{result['status']}: wrote score report to {args.output}")
+        return 0
+    if args.command == "judge-run":
+        output = judge_run(
+            args.run_dir,
+            args.samples,
+            model=args.model,
+            concurrency=args.concurrency,
+        )
+        print(f"wrote judged rows to {output}")
         return 0
     if args.command == "build-index":
         config = load_config(args.config)
@@ -297,58 +326,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run-pipeline":
         config = load_config(args.config)
         run_dir = Path(args.run_dir)
-        if run_dir.exists() and any(run_dir.iterdir()):
-            raise SystemExit(
-                f"run directory is not empty: {run_dir}; choose a fresh run directory"
-            )
-        run_dir.mkdir(parents=True, exist_ok=True)
-        index_manifest = args.index_manifest
-        if index_manifest is None:
-            index_manifest = build_indexes(
-                config,
-                args.documents,
-                args.render_dir,
-                run_dir / "index",
-                models_dir=args.models_dir,
-            )
-        stage_dir = run_dir / "stages"
-        retrieval_path = retrieve_questions(
+        run_coordinator(
             config,
             args.samples,
-            index_manifest,
-            stage_dir / "retrieval.jsonl",
+            args.documents,
+            args.render_dir,
+            run_dir,
+            index_manifest=args.index_manifest,
             models_dir=args.models_dir,
             limit=args.limit,
+            resume=args.resume,
+            retry_failed=args.retry_failed,
+            stop_after=args.stop_after,
         )
-        reranked_path = rerank_questions(
-            config,
-            retrieval_path,
-            index_manifest,
-            stage_dir / "reranked",
-            models_dir=args.models_dir,
-        )
-        ocr_path = ocr_questions(
-            config,
-            reranked_path,
-            index_manifest,
-            stage_dir / "ocr",
-            models_dir=args.models_dir,
-        )
-        answer_questions(
-            config,
-            args.samples,
-            ocr_path,
-            index_manifest,
-            run_dir,
-            models_dir=args.models_dir,
-        )
-        manifest = build_run_manifest(
-            config,
-            run_id=run_dir.name,
-            samples_path=args.samples,
-            index_manifest=index_manifest,
-        )
-        _write_cli_json(run_dir / "manifest.json", manifest.model_dump(mode="json"))
         print(f"wrote staged run to {run_dir}")
         return 0
     if args.command == "gpu-smoke":

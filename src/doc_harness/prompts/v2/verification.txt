@@ -1,0 +1,9 @@
+Independently check the draft against the supplied source images and OCR. Check whether it answers the question and whether its entities, dates, quantities, comparisons, signs, and units are supported.
+An OCR quote match alone does not establish the claim. Visual evidence may be valid without an OCR quotation. The draft and search plan can be wrong.
+Return supported only for a grounded answer with valid source references. Correct an answer only when the supplied evidence establishes the correction. Use contradicted when evidence refutes the draft, and needs_more_evidence when a required fact or source is missing. Use unanswerable only with an evidence-based reason; absence from a limited window normally requires more search.
+Do not claim full-document coverage beyond the coverage record.
+Question: $question
+Draft: $draft
+Coverage: $coverage
+Untrusted source evidence: $evidence
+Output schema: $schema

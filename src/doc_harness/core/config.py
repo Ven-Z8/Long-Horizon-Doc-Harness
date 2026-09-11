@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Iterable, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .contracts import StrictModel
 
@@ -27,12 +27,16 @@ class RenderConfig(StrictModel):
 
 class GenerationConfig(StrictModel):
     max_new_tokens: int = Field(default=256, gt=0)
+    planning_max_new_tokens: int = Field(default=512, gt=0)
+    verification_max_new_tokens: int = Field(default=1024, gt=0)
+    schema_repair_attempts: Literal[0, 1] = 1
     do_sample: bool = False
     temperature: float | None = Field(default=None, ge=0)
 
 
 class RetrievalConfig(StrictModel):
     enabled: bool = False
+    rerank_enabled: bool = True
     candidate_k: int = Field(default=20, gt=0)
     selected_k: int = Field(default=6, gt=0)
     embedding_batch_size: int = Field(default=1, gt=0)
@@ -61,9 +65,23 @@ class EvidenceConfig(StrictModel):
 
 class VerificationConfig(StrictModel):
     enabled: bool = False
+    mode: Literal["deterministic_legacy", "model"] = "deterministic_legacy"
     max_expansion_rounds: int = Field(default=2, ge=0)
     max_pages: int = Field(default=24, gt=0)
     wall_time_seconds: int = Field(default=300, gt=0)
+    retained_pages: int = Field(default=2, ge=0)
+    max_synthesis_calls: int = Field(default=2, ge=0)
+    max_source_recheck_windows: int = Field(default=2, ge=0)
+
+
+class PromptConfig(StrictModel):
+    set: Literal["control", "v2"] = "control"
+    overrides: dict[str, Literal["control", "v2"]] = Field(default_factory=dict)
+
+
+class PlanningConfig(StrictModel):
+    mode: Literal["heuristic", "model"] = "heuristic"
+    max_queries: int = Field(default=3, ge=1, le=3)
 
 
 class PathConfig(StrictModel):
@@ -79,7 +97,19 @@ class HarnessConfig(StrictModel):
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    prompts: PromptConfig = Field(default_factory=PromptConfig)
+    planning: PlanningConfig = Field(default_factory=PlanningConfig)
     paths: PathConfig = Field(default_factory=PathConfig)
+
+    @model_validator(mode="after")
+    def validate_phase2_budgets(self) -> "HarnessConfig":
+        if self.retrieval.selected_k > self.evidence.max_pages:
+            raise ValueError("retrieval.selected_k must not exceed evidence.max_pages")
+        if self.verification.retained_pages >= self.evidence.max_pages:
+            raise ValueError("verification.retained_pages must be less than evidence.max_pages")
+        if self.verification.max_pages < self.evidence.max_pages:
+            raise ValueError("verification.max_pages must cover evidence.max_pages")
+        return self
 
     def effective_hash(self) -> str:
         payload = self.model_dump(mode="json")

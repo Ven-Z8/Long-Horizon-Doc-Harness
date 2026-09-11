@@ -1,0 +1,1 @@
+Transcribe this document page faithfully as markdown. Preserve tables and layout. Do not answer questions.

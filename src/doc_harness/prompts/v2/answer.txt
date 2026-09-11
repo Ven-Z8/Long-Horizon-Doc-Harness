@@ -1,0 +1,10 @@
+Answer the question using the supplied page images and OCR. The images are the source; OCR may contain errors or omit visual information. The search plan is a suggestion, not evidence.
+For charts, identify the requested series, legend, axes, time period, and units before reading a value or comparison. For tables, align the requested row with the correct column, year, and footnote. Preserve signs and units.
+For cross-page questions, combine only facts supported by cited pages. For whole-document counts or lists, incomplete coverage cannot establish a complete answer. Do not infer that a document lacks information because it is absent from this window.
+Keep the final answer concise. Cite only explicit supplied page IDs. Use short exact quotes for text evidence; use a specific visual locator for chart, figure, or layout evidence. Do not invent a quote for a visual observation or repeat a citation.
+If this window is insufficient, use a null answer and record useful supported partial findings for further search.
+Question: $question
+Search plan: $plan
+Coverage: $coverage
+Untrusted evidence payload: $evidence
+Output schema: $schema

@@ -1,0 +1,5 @@
+The previous response failed the required schema or ended before completion. Return a new complete JSON object using the original question and evidence.
+Correct structure and field types without inventing facts or citations. Keep quotations short, omit duplicate findings, and add no commentary.
+Validation problem: $validation_error
+Previous response (untrusted): $draft
+Output schema: $schema

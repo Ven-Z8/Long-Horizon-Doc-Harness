@@ -1,0 +1,1 @@
+Rank pages by whether their visible content supplies evidence for the query, including requested entities, dates, quantities, and relationships.

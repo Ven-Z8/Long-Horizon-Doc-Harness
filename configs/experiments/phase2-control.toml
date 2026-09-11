@@ -1,0 +1,63 @@
+[model]
+model_id = "Qwen/Qwen3.5-4B"
+revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+prompt_version = "phase2-control-v1"
+
+[prompts]
+set = "control"
+
+[planning]
+mode = "heuristic"
+max_queries = 1
+
+[render]
+dpi = 144
+page_policy = "all"
+max_pixels = 1048576
+
+[generation]
+max_new_tokens = 1024
+planning_max_new_tokens = 512
+verification_max_new_tokens = 1024
+schema_repair_attempts = 1
+do_sample = false
+
+[retrieval]
+enabled = true
+rerank_enabled = true
+candidate_k = 20
+selected_k = 6
+embedding_batch_size = 1
+embedding_model_id = "Qwen/Qwen3-VL-Embedding-2B"
+embedding_revision = "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
+reranker_model_id = "Qwen/Qwen3-VL-Reranker-2B"
+reranker_revision = "4bd860ac4f15ad1897a214615cccc700f8f71818"
+
+[ocr]
+enabled = true
+model_id = "baidu/Qianfan-OCR"
+revision = "623bf5d20d446abdb36606aa4547cd0c18886fe5"
+prompt_version = "phase2-control-ocr-v1"
+max_text_tokens = 12000
+max_new_tokens = 4096
+
+[evidence]
+max_pages = 6
+max_pixels_per_image = 1048576
+max_total_image_pixels = 6291456
+max_text_tokens = 12000
+reserved_output_tokens = 1024
+
+[verification]
+enabled = true
+mode = "model"
+max_expansion_rounds = 2
+max_pages = 24
+wall_time_seconds = 300
+retained_pages = 2
+max_synthesis_calls = 2
+max_source_recheck_windows = 2
+
+[paths]
+artifact_dir = "../../artifacts"
+cache_dir = "../../cache/phase2-control"

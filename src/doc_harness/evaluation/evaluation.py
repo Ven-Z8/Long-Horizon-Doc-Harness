@@ -160,6 +160,45 @@ def retrieval_metrics(
     return result
 
 
+def compare_page_rankings(
+    retrieval_order: Sequence[int],
+    reranked_order: Sequence[int],
+    evidence_ids: set[int],
+    *,
+    ks: tuple[int, ...] = (4, 6, 8, 16, 20),
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Compare two page orders at equal context budgets."""
+
+    if any(k <= 0 for k in ks):
+        raise ValueError("all recall cutoffs must be positive")
+    if len(set(retrieval_order)) != len(retrieval_order):
+        raise ValueError("retrieval order contains duplicate pages")
+    if len(set(reranked_order)) != len(reranked_order):
+        raise ValueError("reranked order contains duplicate pages")
+
+    def score(order: Sequence[int], k: int) -> dict[str, Any]:
+        if not evidence_ids:
+            return {
+                "evidence_count": 0,
+                "hit": False,
+                "complete": False,
+                "recall": None,
+            }
+        selected = set(order[:k])
+        overlap = evidence_ids.intersection(selected)
+        return {
+            "evidence_count": len(evidence_ids),
+            "hit": bool(overlap),
+            "complete": evidence_ids.issubset(selected),
+            "recall": len(overlap) / len(evidence_ids),
+        }
+
+    return {
+        "retrieval": {str(k): score(retrieval_order, k) for k in ks},
+        "reranked": {str(k): score(reranked_order, k) for k in ks},
+    }
+
+
 class JudgeErrorType(str, Enum):
     timeout = "timeout"
     invalid_json = "invalid_json"
@@ -362,7 +401,8 @@ def score_run(run_dir: Path, samples_path: Path) -> dict[str, Any]:
     """Validate a pre-judged predictions projection and export comparable metrics only when complete."""
 
     run_dir = Path(run_dir)
-    predictions_path = run_dir / "predictions.json"
+    judged_path = run_dir / "evaluation" / "judged.json"
+    predictions_path = judged_path if judged_path.exists() else run_dir / "predictions.json"
     if not predictions_path.exists():
         raise FileNotFoundError(predictions_path)
     payload = json.loads(predictions_path.read_text(encoding="utf-8"))
