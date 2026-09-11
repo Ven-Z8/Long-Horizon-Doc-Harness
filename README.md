@@ -47,6 +47,15 @@ Run the offline tests:
 uv run pytest -q
 ```
 
+## RunPod setup
+
+For the persistent-volume layout, pinned model and benchmark downloads, CUDA
+verification, safe OpenRouter key handling, and restart/resume procedure, follow
+[`docs/experiments/runpod-setup.md`](docs/experiments/runpod-setup.md). The
+idempotent scripts are `scripts/runpod/bootstrap.sh` and
+`scripts/runpod/verify.sh`; they never delete models, PDFs, caches, or run
+artifacts.
+
 ## Offline smoke run
 
 The smoke command uses a deterministic fake runner and checks that input images exist:
