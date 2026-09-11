@@ -18,8 +18,8 @@ from typing import Any, Iterable
 
 from pydantic import Field
 
-from .contracts import RunRecord, StrictModel, Status
-from .protocol import normalize_question
+from ..core.contracts import RunRecord, StrictModel, Status
+from ..core.protocol import normalize_question
 
 
 class RunManifest(StrictModel):

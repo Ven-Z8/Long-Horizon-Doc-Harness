@@ -16,7 +16,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
 
-from .contracts import Page, ParsedPage as ContractParsedPage, StrictModel
+from ..core.contracts import Page, ParsedPage as ContractParsedPage, StrictModel
 
 
 class ExtractionStatus(str, Enum):

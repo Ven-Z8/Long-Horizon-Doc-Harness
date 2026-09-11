@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .protocol import normalize_question
+from ..core.protocol import normalize_question
 
 
 def _key(row: dict[str, Any]) -> tuple[str, str]:

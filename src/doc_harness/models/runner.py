@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from .contracts import (
+from ..core.contracts import (
     DraftAnswer,
     EvidenceSpan,
     GenerationResult,

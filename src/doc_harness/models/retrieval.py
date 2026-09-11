@@ -19,7 +19,7 @@ from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
-from .contracts import Page, RankedPage, SafeQuestion
+from ..core.contracts import Page, RankedPage, SafeQuestion
 
 
 # Version 2 records the optional focused-render source identity on each Page.

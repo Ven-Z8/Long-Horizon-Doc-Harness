@@ -18,32 +18,32 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .batch import BASELINE_PROMPT, load_v2_samples
-from .config import HarnessConfig
-from .contracts import (
+from ..core.config import HarnessConfig
+from ..core.contracts import (
     ModelRequest,
     Prediction,
     RunRecord,
     SafeQuestion,
     Status,
 )
-from .evidence import EvidenceBudget, EvidenceBundle, build_bundle
-from .manifests import RunManifest, sha256_file
-from .ocr import OCRParsedPage, QianfanOCRParser, parse_cached
+from ..documents.evidence import EvidenceBudget, EvidenceBundle, build_bundle
+from ..evaluation.manifests import RunManifest, sha256_file
+from ..documents.ocr import OCRParsedPage, QianfanOCRParser, parse_cached
 from .planning import SearchState, expand_evidence, plan_question
-from .protocol import export_v2_predictions, normalize_question
-from .rendering import render_pdf, resize_page_for_budget
-from .reranking import (
+from ..core.protocol import export_v2_predictions, normalize_question
+from ..documents.rendering import render_pdf, resize_page_for_budget
+from ..models.reranking import (
     QwenPageReranker,
     read_selection_manifest,
     select_page_manifest,
     write_selection_manifest,
 )
-from .retrieval import (
+from ..models.retrieval import (
     IndexIdentity,
     PageIndex,
     Qwen3VLPageEmbedder,
 )
-from .runner import QwenTransformersRunner
+from ..models.runner import QwenTransformersRunner
 from .verification import verify_answer
 
 
@@ -135,7 +135,7 @@ def _render_document(pdf_path: Path, render_dir: Path, config: HarnessConfig) ->
         try:
             cached = json.loads(manifest_path.read_text(encoding="utf-8"))
             if cached.get("source") == source:
-                from .contracts import Page
+                from ..core.contracts import Page
 
                 pages = [Page.model_validate(item) for item in cached.get("pages", [])]
                 if pages and all(Path(page.image_path).is_file() for page in pages):
@@ -576,7 +576,7 @@ def answer_questions(
             ):
                 # A top-k candidate set cannot support an exhaustive count.  Keep
                 # the draft in metadata but require a coverage-aware abstention.
-                from .contracts import Verification, VerifyDecision
+                from ..core.contracts import Verification, VerifyDecision
 
                 verification = Verification(
                     decision=VerifyDecision.abstain,

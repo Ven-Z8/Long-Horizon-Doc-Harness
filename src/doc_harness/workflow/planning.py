@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from .contracts import SafeQuestion, StrictModel
+from ..core.contracts import SafeQuestion, StrictModel
 
 
 class QuestionPlan(StrictModel):

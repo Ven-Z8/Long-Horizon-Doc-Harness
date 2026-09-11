@@ -17,8 +17,8 @@ from typing import Any
 
 from pydantic import Field
 
-from .contracts import BenchmarkSample, StrictModel
-from .protocol import normalize_question
+from ..core.contracts import BenchmarkSample, StrictModel
+from ..core.protocol import normalize_question
 
 
 _RECALL_KS = (4, 8, 16, 20)

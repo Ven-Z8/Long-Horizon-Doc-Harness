@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from .contracts import Page
+from ..core.contracts import Page
 
 
 def validate_pages(pages: Sequence[Page]) -> None:

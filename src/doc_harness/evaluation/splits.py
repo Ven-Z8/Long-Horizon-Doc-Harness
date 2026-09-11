@@ -6,8 +6,8 @@ import hashlib
 from pathlib import Path
 from typing import Iterable
 
-from .batch import load_v2_samples
-from .protocol import normalize_question
+from ..workflow.batch import load_v2_samples
+from ..core.protocol import normalize_question
 
 
 def _key(item: dict[str, object]) -> tuple[str, str]:

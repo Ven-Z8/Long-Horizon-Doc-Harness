@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from pydantic import Field
 
-from .contracts import (
+from ..core.contracts import (
     DraftAnswer,
     SafeQuestion,
     StrictModel,

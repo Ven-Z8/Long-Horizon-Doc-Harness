@@ -10,18 +10,18 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
 
-from .config import HarnessConfig
-from .contracts import (
+from ..core.config import HarnessConfig
+from ..core.contracts import (
     BenchmarkSample,
     Prediction,
     RunRecord,
     StageFailure,
     Status,
 )
-from .protocol import build_request, export_v2_predictions, normalize_question
-from .records import read_run_records, write_run_record
-from .rendering import render_pdf
-from .runner import ModelRunner
+from ..core.protocol import build_request, export_v2_predictions, normalize_question
+from ..core.records import read_run_records, write_run_record
+from ..documents.rendering import render_pdf
+from ..models.runner import ModelRunner
 
 
 BASELINE_PROMPT = (
@@ -114,7 +114,7 @@ def _render_document(
             if cached.get("source") == source:
                 pages = cached.get("pages", [])
                 if pages and all(Path(page["image_path"]).is_file() for page in pages):
-                    from .contracts import Page
+                    from ..core.contracts import Page
 
                     return [Page.model_validate(page) for page in pages]
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):

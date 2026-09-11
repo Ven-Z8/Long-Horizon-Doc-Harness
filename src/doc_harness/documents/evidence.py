@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from pydantic import AliasChoices, Field, model_validator
 
-from .contracts import Page, StrictModel
+from ..core.contracts import Page, StrictModel
 from .ocr import ExtractionStatus
 
 

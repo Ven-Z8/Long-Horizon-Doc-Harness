@@ -7,8 +7,8 @@ from typing import Any, Callable, Sequence
 
 from pydantic import Field
 
-from .config import HarnessConfig
-from .contracts import (
+from ..core.config import HarnessConfig
+from ..core.contracts import (
     DraftAnswer,
     Page,
     RankedPage,

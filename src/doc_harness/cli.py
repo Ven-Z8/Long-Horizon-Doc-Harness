@@ -9,17 +9,17 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from .batch import run_v2_batch
-from .config import load_config
-from .contracts import BenchmarkSample, ModelRequest, Page, Prediction, RunRecord, StageFailure, Status
-from .evaluation import score_run
-from .experiments import compare_runs, write_report
-from .manifests import audit_records
-from .protocol import build_request, export_v2_predictions, validate_prediction_coverage
-from .records import read_run_records, write_run_record
-from .runner import FakeRunner, ModelRunner, QwenTransformersRunner
-from .splits import create_document_split
-from .stages import (
+from .workflow.batch import run_v2_batch
+from .core.config import load_config
+from .core.contracts import BenchmarkSample, ModelRequest, Page, Prediction, RunRecord, StageFailure, Status
+from .evaluation.evaluation import score_run
+from .evaluation.experiments import compare_runs, write_report
+from .evaluation.manifests import audit_records
+from .core.protocol import build_request, export_v2_predictions, validate_prediction_coverage
+from .core.records import read_run_records, write_run_record
+from .models.runner import FakeRunner, ModelRunner, QwenTransformersRunner
+from .evaluation.splits import create_document_split
+from .workflow.stages import (
     answer_questions,
     build_indexes,
     build_run_manifest,

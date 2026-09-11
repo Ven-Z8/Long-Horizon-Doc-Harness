@@ -11,7 +11,7 @@ from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 from pydantic import Field
 
-from .contracts import Page, RankedPage, SafeQuestion, StrictModel
+from ..core.contracts import Page, RankedPage, SafeQuestion, StrictModel
 from .retrieval import PageIndex, _check_top_k
 
 

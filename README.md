@@ -15,6 +15,25 @@ The staged runner loads one heavyweight checkpoint at a time. Each phase writes 
 artifact that the next phase validates, so an RTX 4090 does not need all four
 models resident together.
 
+
+## Source layout
+
+The Python package is organized by responsibility:
+
+```text
+src/doc_harness/
+├── core/       contracts, configuration, protocol, and run records
+├── documents/  PDF rendering, OCR, and evidence bundles
+├── models/     generation, retrieval, and reranking adapters
+├── workflow/   batch and staged execution, planning, and verification
+├── evaluation/ scoring, audits, comparisons, and split creation
+└── cli.py      command-line entry point
+```
+
+The original flat imports such as `doc_harness.rendering` remain supported for
+existing notebooks and scripts; new code can use the grouped paths such as
+`doc_harness.documents.rendering`.
+
 ## Local setup
 
 ```bash
