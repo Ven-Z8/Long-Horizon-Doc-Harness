@@ -34,11 +34,19 @@ class FakeRunner:
 class QwenTransformersRunner:
     """Qwen3.5 runner with all heavyweight imports deferred until construction."""
 
-    def __init__(self, processor, model, max_new_tokens: int = 256, do_sample: bool = False):
+    def __init__(
+        self,
+        processor,
+        model,
+        max_new_tokens: int = 256,
+        do_sample: bool = False,
+        max_pixels: int | None = None,
+    ):
         self.processor = processor
         self.model = model
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
+        self.max_pixels = max_pixels
 
     @classmethod
     def from_pretrained(
@@ -47,6 +55,7 @@ class QwenTransformersRunner:
         revision: str,
         max_new_tokens: int = 256,
         do_sample: bool = False,
+        max_pixels: int | None = None,
     ) -> "QwenTransformersRunner":
         try:
             import torch
@@ -60,14 +69,19 @@ class QwenTransformersRunner:
                 "Qwen execution requires torch and transformers; install the gpu extra"
             ) from exc
 
-        processor = AutoProcessor.from_pretrained(model_id, revision=revision)
+        processor_kwargs = {}
+        if max_pixels is not None:
+            processor_kwargs["max_pixels"] = max_pixels
+        processor = AutoProcessor.from_pretrained(
+            model_id, revision=revision, **processor_kwargs
+        )
         model = ModelClass.from_pretrained(
             model_id,
             revision=revision,
             dtype=torch.bfloat16,
             device_map="auto",
         ).eval()
-        return cls(processor, model, max_new_tokens, do_sample)
+        return cls(processor, model, max_new_tokens, do_sample, max_pixels)
 
     def run(self, request: ModelRequest) -> DraftAnswer:
         if len(request.page_ids) != len(request.image_paths):
@@ -83,13 +97,19 @@ class QwenTransformersRunner:
             content = [{"type": "image", "image": image} for image in images]
             content.append({"type": "text", "text": f"{request.prompt}\n\nQuestion: {request.question}"})
             messages = [{"role": "user", "content": content}]
-            inputs = self.processor.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
+            template_kwargs = {
+                "add_generation_prompt": True,
+                "tokenize": True,
+                "return_dict": True,
+                "return_tensors": "pt",
+            }
+            try:
+                inputs = self.processor.apply_chat_template(
+                    messages, enable_thinking=False, **template_kwargs
+                )
+            except TypeError:
+                # Older Qwen processors do not expose the thinking switch.
+                inputs = self.processor.apply_chat_template(messages, **template_kwargs)
             inputs = inputs.to(self.model.device)
             with torch.inference_mode():
                 output_ids = self.model.generate(
@@ -132,4 +152,9 @@ def parse_draft_answer(text: str) -> DraftAnswer:
                 return DraftAnswer.model_validate(payload)
             except Exception:
                 continue
-    raise ValueError("model response does not contain a valid DraftAnswer JSON object")
+    # Keep a useful answer when a local checkpoint ignores the JSON-only instruction.
+    # The V2 judge scores the complete response semantically, so preserving the model's
+    # prose is more informative than converting a parseable answer into an abstention.
+    if candidate:
+        return DraftAnswer(answer=candidate, evidence=[], insufficient_evidence=False)
+    raise ValueError("model response is empty")

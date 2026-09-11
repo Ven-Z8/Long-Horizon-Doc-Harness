@@ -56,6 +56,21 @@ uv run python -m doc_harness.cli gpu-smoke \
 
 If the checkpoint or CUDA runtime cannot be loaded, the command exits with the underlying dependency or model error and the run record identifies the failed stage.
 
+## Full V2 baseline run
+
+The batch command groups questions by source PDF, caches deterministic page renders, and resumes rows already present in its prediction file. Start with a small limit before launching the full 1,071-question run:
+
+```bash
+uv run python -m doc_harness.cli run-v2 \
+  --config configs/baseline.toml \
+  --limit 1 \
+  --output artifacts/v2-predictions.json \
+  --records artifacts/v2-runs.jsonl \
+  --render-dir cache/v2-pages
+```
+
+Remove `--limit` for the complete baseline. The model processes every page of each PDF; the processor downsizes each page to the configured `max_pixels` budget and the render cache is reused on resume.
+
 ## V2 scoring
 
 First produce a complete prediction list with one row per `(doc_id, question)`. Validate and export it with:
@@ -68,5 +83,15 @@ uv run python -m doc_harness.cli export-v2 \
 ```
 
 Then run the pinned MMLongBench-Doc V2 evaluator from its checkout. The evaluator requires a judge credential supplied by the user through `OPENAI_API_KEY` or `OPENROUTER_API_KEY`; the harness never stores or logs that credential.
+
+Install the evaluator client extra and score the complete prediction file with OpenRouter:
+
+```bash
+uv sync --extra eval
+export OPENROUTER_API_KEY='your-key'
+uv run python benchmark/mmlongbench-doc-v2/eval/evaluate.py \
+  artifacts/v2-predictions.json \
+  --out artifacts/v2-scored.json
+```
 
 The design and implementation plan are in `docs/superpowers/specs/` and `docs/superpowers/plans/`. Model revisions are in `models.lock`; the CUDA environment is intentionally finalized after the first RunPod feasibility probe.

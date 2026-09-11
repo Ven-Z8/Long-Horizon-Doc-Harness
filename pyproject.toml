@@ -15,6 +15,7 @@ dependencies = [
 dev = ["pytest>=8.0,<9"]
 pdf = ["PyMuPDF>=1.24,<2", "Pillow>=10,<13"]
 gpu = ["accelerate>=1.15", "torch>=2.6", "torchvision>=0.29", "transformers>=4.51"]
+eval = ["openai>=1.0,<2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/doc_harness"]

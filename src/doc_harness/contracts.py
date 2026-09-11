@@ -96,6 +96,7 @@ class BenchmarkSample(StrictModel):
     evidence_sources: list[str] = Field(default_factory=list)
     doc_type: str | None = None
     question_type: str | None = None
+    answer_format: str | None = None
 
 
 class ModelRequest(StrictModel):

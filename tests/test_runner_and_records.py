@@ -57,3 +57,8 @@ def test_parse_draft_answer_skips_evidence_only_object():
         '{"answer":"100","evidence":[],"insufficient_evidence":false}'
     )
     assert draft.answer == "100"
+
+
+def test_parse_draft_answer_preserves_non_json_prose():
+    draft = parse_draft_answer("The answer is Less well-off.")
+    assert draft.answer == "The answer is Less well-off."

@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
+from .batch import run_v2_batch
 from .config import load_config
 from .contracts import BenchmarkSample, ModelRequest, Page, Prediction, RunRecord, StageFailure, Status
 from .protocol import build_request, export_v2_predictions, validate_prediction_coverage
@@ -132,6 +133,19 @@ def _parser() -> argparse.ArgumentParser:
     gpu.add_argument("--image", action="append", required=True, dest="images")
     gpu.add_argument("--output", required=True, type=Path)
     gpu.add_argument("--prediction", required=True, type=Path)
+
+    batch = subparsers.add_parser("run-v2", help="run the Qwen baseline over V2 samples")
+    batch.add_argument("--config", type=Path, default=Path("configs/baseline.toml"))
+    batch.add_argument(
+        "--samples",
+        type=Path,
+        default=Path("benchmark/mmlongbench-doc-v2/data/samples.json"),
+    )
+    batch.add_argument("--documents", type=Path, default=Path("data/documents"))
+    batch.add_argument("--output", type=Path, default=Path("artifacts/v2-predictions.json"))
+    batch.add_argument("--records", type=Path, default=Path("artifacts/v2-runs.jsonl"))
+    batch.add_argument("--render-dir", type=Path, default=Path("cache/v2-pages"))
+    batch.add_argument("--limit", type=int, default=None)
     return parser
 
 
@@ -146,25 +160,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "export-v2":
         export_v2_from_files(args.samples, args.predictions, args.output)
         return 0
+    if args.command == "gpu-smoke":
+        config = load_config(args.config)
+        missing = [path for path in args.images if not Path(path).is_file()]
+        if missing:
+            raise SystemExit(f"image does not exist: {missing[0]}")
+        runner = QwenTransformersRunner.from_pretrained(
+            config.model.model_id,
+            config.model.revision,
+            max_new_tokens=config.generation.max_new_tokens,
+            do_sample=config.generation.do_sample,
+            max_pixels=config.render.max_pixels,
+        )
+        run_smoke(
+            args.question,
+            args.document_id,
+            args.images,
+            args.output,
+            args.prediction,
+            runner=runner,
+            config_hash=config.effective_hash(),
+        )
+        return 0
     config = load_config(args.config)
-    missing = [path for path in args.images if not Path(path).is_file()]
-    if missing:
-        raise SystemExit(f"image does not exist: {missing[0]}")
+    if not args.samples.is_file():
+        raise SystemExit(f"samples file does not exist: {args.samples}")
+    if not args.documents.is_dir():
+        raise SystemExit(f"documents directory does not exist: {args.documents}")
     runner = QwenTransformersRunner.from_pretrained(
         config.model.model_id,
         config.model.revision,
         max_new_tokens=config.generation.max_new_tokens,
         do_sample=config.generation.do_sample,
+        max_pixels=config.render.max_pixels,
     )
-    run_smoke(
-        args.question,
-        args.document_id,
-        args.images,
-        args.output,
-        args.prediction,
+    predictions = run_v2_batch(
+        samples_path=args.samples,
+        documents_dir=args.documents,
+        output_path=args.output,
+        records_path=args.records,
+        render_dir=args.render_dir,
+        config=config,
         runner=runner,
-        config_hash=config.effective_hash(),
+        limit=args.limit,
     )
+    print(f"wrote {len(predictions)} predictions to {args.output}")
     return 0
 
 

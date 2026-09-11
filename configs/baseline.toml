@@ -6,7 +6,8 @@ prompt_version = "baseline-v1"
 [render]
 dpi = 144
 page_policy = "all"
-max_pixels = 1840000
+# Per-page processor budget; all document pages remain in the request.
+max_pixels = 262144
 
 [generation]
 max_new_tokens = 256
