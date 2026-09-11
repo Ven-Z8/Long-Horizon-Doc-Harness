@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "A reproducible harness for long multimodal document understanding"
 requires-python = ">=3.12"
 dependencies = [
+  "numpy>=1.26,<3",
   "pydantic>=2.7,<3",
 ]
 
