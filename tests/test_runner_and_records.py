@@ -2,7 +2,7 @@ from pathlib import Path
 
 from doc_harness.contracts import DraftAnswer, ModelRequest, RunRecord
 from doc_harness.records import read_run_records, write_run_record
-from doc_harness.runner import FakeRunner
+from doc_harness.runner import FakeRunner, parse_draft_answer
 
 
 def request():
@@ -34,3 +34,26 @@ def test_run_record_jsonl_round_trip(tmp_path: Path):
     )
     write_run_record(record, path)
     assert read_run_records(path) == [record]
+
+
+def test_parse_draft_answer_removes_thinking_and_json_fence():
+    draft = parse_draft_answer(
+        '<think>inspect the page</think>\n```json\n'
+        '{"answer":"A","evidence":[],"insufficient_evidence":false}\n```'
+    )
+    assert draft.answer == "A"
+
+
+def test_parse_draft_answer_extracts_json_from_surrounding_text():
+    draft = parse_draft_answer(
+        'Here is the answer. {"answer":"A","evidence":[],"insufficient_evidence":false}'
+    )
+    assert draft.answer == "A"
+
+
+def test_parse_draft_answer_skips_evidence_only_object():
+    draft = parse_draft_answer(
+        '{"page_id":"1","quote":"Total debt"}\n'
+        '{"answer":"100","evidence":[],"insufficient_evidence":false}'
+    )
+    assert draft.answer == "100"

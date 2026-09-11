@@ -14,7 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0,<9"]
 pdf = ["PyMuPDF>=1.24,<2", "Pillow>=10,<13"]
-gpu = ["torch>=2.6", "transformers>=4.51"]
+gpu = ["accelerate>=1.15", "torch>=2.6", "torchvision>=0.29", "transformers>=4.51"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/doc_harness"]

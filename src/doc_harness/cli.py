@@ -45,7 +45,19 @@ def run_smoke(
         raise ValueError("at least one image is required")
     pages = _synthetic_pages(document_id, image_paths)
     sample = BenchmarkSample(doc_id=document_id, question=question, answer="")
-    request = build_request(sample, pages, "Answer only from the supplied pages.", config_hash)
+    request = build_request(
+        sample,
+        pages,
+        (
+            "Answer only from the supplied pages. Return JSON exactly with keys "
+            "answer (string or null), evidence (list of {page_id, quote}), and "
+            "insufficient_evidence (boolean). The top-level object must contain "
+            "all three keys and no evidence-only object. Use zero-based page_id "
+            "values exactly as supplied. Use null and true when the pages do not "
+            "support an answer."
+        ),
+        config_hash,
+    )
     selected_runner = runner or FakeRunner()
     run_id = uuid.uuid4().hex
     started = time.perf_counter()

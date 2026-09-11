@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -63,7 +64,7 @@ class QwenTransformersRunner:
         model = ModelClass.from_pretrained(
             model_id,
             revision=revision,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
         ).eval()
         return cls(processor, model, max_new_tokens, do_sample)
@@ -107,13 +108,28 @@ class QwenTransformersRunner:
 def parse_draft_answer(text: str) -> DraftAnswer:
     """Parse strict JSON, accepting one common fenced-JSON repair form."""
 
-    candidate = text.strip()
+    candidate = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if candidate.startswith("```"):
         lines = candidate.splitlines()
         if lines and lines[-1].strip() == "```":
             candidate = "\n".join(lines[1:-1]).strip()
+    objects: list[object] = []
     try:
-        payload = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ValueError("model response is not valid JSON") from exc
-    return DraftAnswer.model_validate(payload)
+        objects.append(json.loads(candidate))
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", candidate):
+            try:
+                payload, _ = decoder.raw_decode(candidate[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            objects.append(payload)
+
+    required = {"answer", "evidence", "insufficient_evidence"}
+    for payload in objects:
+        if isinstance(payload, dict) and required.issubset(payload):
+            try:
+                return DraftAnswer.model_validate(payload)
+            except Exception:
+                continue
+    raise ValueError("model response does not contain a valid DraftAnswer JSON object")
