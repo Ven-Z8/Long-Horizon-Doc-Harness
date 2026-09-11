@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "long-horizon-doc-harness"
+version = "0.1.0"
+description = "A reproducible harness for long multimodal document understanding"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0,<9"]
+pdf = ["PyMuPDF>=1.24,<2", "Pillow>=10,<13"]
+gpu = ["torch>=2.6", "transformers>=4.51"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doc_harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
