@@ -160,6 +160,10 @@ The reproducibility and promotion rules are documented in
 `docs/experiments/runbook.md` and the five-stage plan in
 `docs/superpowers/plans/2026-09-11-five-stage-harness-implementation.md`.
 
+Graph retrieval is an opt-in experiment and does not alter the baseline. Follow
+the [graph retrieval runbook](docs/experiments/graph-retrieval-runbook.md) for
+CPU validation, graph construction, and the bounded smoke run.
+
 ## V2 scoring
 
 First produce a complete prediction list with one row per `(doc_id, question)`. Validate and export it with:
