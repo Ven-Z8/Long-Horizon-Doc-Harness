@@ -45,6 +45,10 @@ the control. The embedding screen supplies seed pages, bounded graph expansion
 adds candidates, and the existing reranker selects the final evidence bundle.
 Run a matched 20-question smoke before any larger ablation:
 
+Gate: the existing one-page GPU feasibility probe must pass before starting
+this 20-question smoke. Both the one-page probe and this smoke must pass before
+launching any full benchmark.
+
 ```bash
 cd /workspace/Long-Horizon-Doc-Harness
 uv run python -m doc_harness.cli run-pipeline \
