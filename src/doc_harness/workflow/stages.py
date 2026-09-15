@@ -548,6 +548,30 @@ def _ocr_page_pool(manifest: SelectionManifest, *, max_pages: int) -> list[int]:
     return list(dict.fromkeys(ordered))[:max_pages]
 
 
+def _verification_ocr_page_pool(
+    manifest: SelectionManifest,
+    index: PageIndex,
+    *,
+    global_scope: bool,
+    graph_enabled: bool,
+    max_pages: int,
+) -> list[int]:
+    """Choose OCR pages without changing the graph-disabled baseline order."""
+
+    if not graph_enabled:
+        if global_scope:
+            return [page.page_id for page in index.pages[:max_pages]]
+        return [entry.page_id for entry in manifest.candidates[:max_pages]]
+    if global_scope:
+        return list(
+            dict.fromkeys(
+                [entry.page_id for entry in manifest.selected]
+                + [page.page_id for page in index.pages]
+            )
+        )[:max_pages]
+    return _ocr_page_pool(manifest, max_pages=max_pages)
+
+
 def retrieve_questions(
     config: HarnessConfig,
     samples_path: Path,
@@ -886,17 +910,13 @@ def ocr_questions(
         pages = {page.page_id: page for page in index.pages}
         plan = plan_question(SafeQuestion(document_id=manifest.document_id, question=manifest.question))
         if config.verification.enabled:
-            if plan.scope == "global":
-                page_ids = list(
-                    dict.fromkeys(
-                        [entry.page_id for entry in manifest.selected]
-                        + [page.page_id for page in index.pages]
-                    )
-                )[: config.verification.max_pages]
-            else:
-                page_ids = _ocr_page_pool(
-                    manifest, max_pages=config.verification.max_pages
-                )
+            page_ids = _verification_ocr_page_pool(
+                manifest,
+                index,
+                global_scope=plan.scope == "global",
+                graph_enabled=config.graph.enabled,
+                max_pages=config.verification.max_pages,
+            )
         else:
             page_ids = [entry.page_id for entry in manifest.selected]
         requested_by_row.append((row, manifest, page_ids))

@@ -153,6 +153,35 @@ def test_ocr_pool_keeps_selected_page_when_it_falls_below_candidate_cutoff(tmp_p
     assert stages._ocr_page_pool(manifest, max_pages=2) == [9, 0]
 
 
+def test_disabled_global_ocr_pool_keeps_original_index_order(tmp_path: Path):
+    """Catches graph-only OCR promotion leaking into a disabled baseline run."""
+
+    selected = SelectionEntry(
+        page_id=9,
+        retrieval_score=1.0,
+        retrieval_rank=4,
+        rerank_score=1.0,
+        rerank_rank=4,
+    )
+    manifest = SelectionManifest(
+        document_id="d.pdf",
+        question="How many?",
+        index_fingerprint="index",
+        candidate_k=4,
+        selected_k=1,
+        candidates=[selected],
+        selected=[selected],
+    )
+
+    assert stages._verification_ocr_page_pool(
+        manifest,
+        _index(tmp_path, source_sha256="pdf-bytes", page_count=10),
+        global_scope=True,
+        graph_enabled=False,
+        max_pages=2,
+    ) == [0, 1]
+
+
 def test_graph_eligibility_rejects_same_document_with_different_source_hash(tmp_path: Path):
     """Catches a stale graph that happens to keep the same document filename."""
 
