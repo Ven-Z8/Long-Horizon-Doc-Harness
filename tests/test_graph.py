@@ -1,7 +1,19 @@
+import json
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from doc_harness.documents.graph import DocumentGraph, GraphEdge, GraphNode, GraphSearchState
+from doc_harness.documents.graph import (
+    DocumentGraph,
+    GraphEdge,
+    GraphNode,
+    GraphSearchState,
+    build_document_graph,
+    read_graph,
+    write_graph,
+)
+from doc_harness.workflow.stages import build_graphs, load_graph_manifest
 
 
 def _node(node_id: str, *, document_id: str = "document-a", page_ids: list[int] | None = None) -> GraphNode:
@@ -111,3 +123,120 @@ def test_graph_search_state_rejects_negative_page_ids():
 
     with pytest.raises(ValueError, match="page IDs"):
         GraphSearchState(seed_page_ids=[-1])
+
+
+def test_build_document_graph_creates_deterministic_structural_and_reference_edges():
+    """Catches changes to deterministic page IDs and explicit references."""
+
+    graph = build_document_graph(
+        "document-a.pdf",
+        ["Introduction.", "See page 3 for the exception.", "The exception."],
+        source_sha256="source-hash",
+        extraction_version="graph-v1",
+    )
+
+    assert [node.node_id for node in graph.nodes] == [
+        "document-a.pdf",
+        "document-a.pdf:page:0",
+        "document-a.pdf:page:1",
+        "document-a.pdf:page:2",
+    ]
+    assert [(edge.source_id, edge.relation, edge.target_id) for edge in graph.edges] == [
+        ("document-a.pdf", "contains", "document-a.pdf:page:0"),
+        ("document-a.pdf", "contains", "document-a.pdf:page:1"),
+        ("document-a.pdf", "contains", "document-a.pdf:page:2"),
+        ("document-a.pdf:page:0", "follows", "document-a.pdf:page:1"),
+        ("document-a.pdf:page:1", "follows", "document-a.pdf:page:2"),
+        ("document-a.pdf:page:1", "refers_to", "document-a.pdf:page:2"),
+    ]
+    reference = graph.edges[-1]
+    assert reference.page_ids == [1]
+    assert reference.quote == "See page 3 for the exception."
+    assert reference.source_locator == "page-text"
+
+
+def test_graph_json_round_trip_rejects_changed_source_hash(tmp_path: Path):
+    """Catches graph reuse after the PDF source bytes change."""
+
+    graph = build_document_graph(
+        "document-a.pdf",
+        ["A single page."],
+        source_sha256="source-hash",
+        extraction_version="graph-v1",
+    )
+    path = tmp_path / "graph.json"
+
+    write_graph(graph, path)
+
+    assert read_graph(path) == graph
+    with pytest.raises(ValueError, match="source hash"):
+        read_graph(path, expected_source_sha256="changed-source-hash")
+
+
+def test_build_graphs_writes_and_validates_document_scoped_manifest(tmp_path: Path):
+    """Catches graph artifacts that omit source, parser, or configuration identity."""
+
+    fitz = pytest.importorskip("pymupdf")
+    documents_dir = tmp_path / "documents"
+    documents_dir.mkdir()
+    pdf_path = documents_dir / "document-a.pdf"
+    document = fitz.open()
+    try:
+        page = document.new_page()
+        page.insert_text((72, 72), "See page 2 for the exception.")
+        document.new_page().insert_text((72, 72), "The exception.")
+        document.save(pdf_path)
+    finally:
+        document.close()
+
+    class _GraphConfig:
+        extraction_version = "graph-v1"
+
+    class _Config:
+        graph = _GraphConfig()
+
+        @staticmethod
+        def effective_hash() -> str:
+            return "config-hash"
+
+    manifest_path = build_graphs(_Config(), documents_dir, tmp_path / "graphs")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    graphs = load_graph_manifest(manifest_path)
+
+    assert manifest["config_hash"] == "config-hash"
+    assert manifest["entries"][0]["page_count"] == 2
+    assert graphs["document-a.pdf"].extraction_version == "graph-v1"
+    assert graphs["document-a.pdf"].edges[-1].relation == "refers_to"
+
+
+def test_load_graph_manifest_rejects_extraction_identity_mismatch(tmp_path: Path):
+    """Catches stale graph metadata whose manifest disagrees with graph bytes."""
+
+    graph = build_document_graph("document-a.pdf", ["One page."], "source-hash", "graph-v1")
+    graph_path = tmp_path / "document-a.pdf.graph.json"
+    write_graph(graph, graph_path)
+    manifest_path = tmp_path / "graph-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "graph",
+                "config_hash": "config-hash",
+                "entries": [
+                    {
+                        "document_id": "document-a.pdf",
+                        "source_sha256": "source-hash",
+                        "schema_version": 1,
+                        "extraction_version": "changed-version",
+                        "graph_fingerprint": "unused",
+                        "page_count": 1,
+                        "graph_path": str(graph_path),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="extraction"):
+        load_graph_manifest(manifest_path)

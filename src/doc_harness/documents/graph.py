@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Literal, Sequence
 
 from pydantic import Field, model_validator
 
@@ -16,6 +20,9 @@ SEMANTIC_RELATIONS = {
     "contradicts",
     "depends_on",
 }
+
+_PAGE_REFERENCE = re.compile(r"(?:page|p\.)\s+(\d+)", re.IGNORECASE)
+_SENTENCE = re.compile(r"[^.!?]+[.!?]|[^.!?]+$", re.DOTALL)
 
 
 class GraphNode(StrictModel):
@@ -106,3 +113,157 @@ class GraphSearchState(StrictModel):
         if any(page_id < 0 for page_id in page_ids):
             raise ValueError("page IDs must be greater than or equal to 0")
         return self
+
+
+def build_document_graph(
+    document_id: str,
+    page_texts: Sequence[str],
+    source_sha256: str,
+    extraction_version: str,
+) -> DocumentGraph:
+    """Build a question-independent structural graph from extracted page text."""
+
+    document_node_id = document_id
+    nodes = [
+        GraphNode(
+            node_id=document_node_id,
+            document_id=document_id,
+            kind="document",
+            label=document_id,
+        )
+    ]
+    edges: list[GraphEdge] = []
+    normalized_texts: list[str] = []
+    for page_id, text in enumerate(page_texts):
+        if not isinstance(text, str):
+            raise TypeError("page_texts must contain strings")
+        normalized_texts.append(text)
+        page_node_id = _page_node_id(document_id, page_id)
+        nodes.append(
+            GraphNode(
+                node_id=page_node_id,
+                document_id=document_id,
+                kind="page",
+                label=f"Page {page_id + 1}",
+                page_ids=[page_id],
+                source_locator="page-text",
+            )
+        )
+        edges.append(
+            GraphEdge(
+                source_id=document_node_id,
+                relation="contains",
+                target_id=page_node_id,
+                page_ids=[page_id],
+                source_locator="document-page-order",
+            )
+        )
+
+    for page_id in range(len(normalized_texts) - 1):
+        edges.append(
+            GraphEdge(
+                source_id=_page_node_id(document_id, page_id),
+                relation="follows",
+                target_id=_page_node_id(document_id, page_id + 1),
+                page_ids=[page_id, page_id + 1],
+                source_locator="page-order",
+            )
+        )
+
+    for page_id, text in enumerate(normalized_texts):
+        for sentence in _sentences_with_page_references(text):
+            for match in _PAGE_REFERENCE.finditer(sentence):
+                target_page_id = int(match.group(1)) - 1
+                if 0 <= target_page_id < len(normalized_texts):
+                    edges.append(
+                        GraphEdge(
+                            source_id=_page_node_id(document_id, page_id),
+                            relation="refers_to",
+                            target_id=_page_node_id(document_id, target_page_id),
+                            page_ids=[page_id],
+                            quote=sentence,
+                            source_locator="page-text",
+                        )
+                    )
+
+    nodes.sort(key=lambda node: (node.kind != "document", node.page_ids, node.node_id))
+    relation_order = {"contains": 0, "follows": 1, "refers_to": 2}
+    edges.sort(
+        key=lambda edge: (
+            relation_order.get(edge.relation, 99),
+            edge.source_id,
+            edge.target_id,
+            edge.page_ids,
+            edge.quote or "",
+        )
+    )
+    return DocumentGraph(
+        document_id=document_id,
+        source_sha256=source_sha256,
+        extraction_version=extraction_version,
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def graph_fingerprint(graph: DocumentGraph) -> str:
+    """Return the stable identity hash for a validated graph artifact."""
+
+    encoded = json.dumps(
+        graph.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_graph(graph: DocumentGraph, path: Path) -> None:
+    """Atomically write a validated graph as deterministic JSON."""
+
+    payload = graph.model_dump(mode="json")
+    _write_json(Path(path), payload)
+
+
+def read_graph(path: Path, expected_source_sha256: str | None = None) -> DocumentGraph:
+    """Read a graph and reject artifacts from a different source document."""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        graph = DocumentGraph.model_validate(payload)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid graph artifact: {path}") from exc
+    if expected_source_sha256 is not None and graph.source_sha256 != expected_source_sha256:
+        raise ValueError("graph source hash does not match expected source hash")
+    return graph
+
+
+def _page_node_id(document_id: str, page_id: int) -> str:
+    return f"{document_id}:page:{page_id}"
+
+
+def _sentences_with_page_references(text: str) -> list[str]:
+    return [
+        match.group(0).strip()
+        for match in _SENTENCE.finditer(text)
+        if _PAGE_REFERENCE.search(match.group(0))
+    ]
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+__all__ = [
+    "DocumentGraph",
+    "GraphEdge",
+    "GraphNode",
+    "GraphSearchState",
+    "build_document_graph",
+    "graph_fingerprint",
+    "read_graph",
+    "write_graph",
+]

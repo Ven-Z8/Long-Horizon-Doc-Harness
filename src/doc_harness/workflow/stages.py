@@ -31,6 +31,13 @@ from ..core.contracts import (
 from ..core.answers import QuestionOutcome
 from ..core.answers import AnswerDraftV2, VerificationReportV2
 from ..documents.evidence import EvidenceBudget, EvidenceBundle, build_bundle
+from ..documents.graph import (
+    DocumentGraph,
+    build_document_graph,
+    graph_fingerprint,
+    read_graph,
+    write_graph,
+)
 from ..evaluation.manifests import RunManifest, sha256_file
 from ..documents.ocr import OCRParsedPage, QianfanOCRParser, parse_cached
 from .planning import SearchState, expand_evidence, plan_question
@@ -229,6 +236,111 @@ def _document_paths(documents_dir: Path, document_ids: Sequence[str] | None = No
     if not paths:
         raise ValueError(f"no PDF documents found in {documents_dir}")
     return paths
+
+
+def build_graphs(
+    config: HarnessConfig,
+    documents_dir: Path,
+    output_dir: Path,
+    document_ids: Sequence[str] | None = None,
+) -> Path:
+    """Extract PDF text locally and persist one deterministic graph per document."""
+
+    try:
+        import pymupdf as fitz
+    except ImportError as exc:
+        raise RuntimeError("graph construction requires PyMuPDF; install the project's pdf extra") from exc
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, Any]] = []
+    for pdf_path in _document_paths(documents_dir, document_ids):
+        document = fitz.open(pdf_path)
+        try:
+            page_texts = [page.get_text("text") for page in document]
+        finally:
+            document.close()
+        source_sha256 = sha256_file(pdf_path)
+        graph = build_document_graph(
+            pdf_path.name,
+            page_texts,
+            source_sha256=source_sha256,
+            extraction_version=config.graph.extraction_version,
+        )
+        graph_path = output_dir / f"{pdf_path.name}.graph.json"
+        write_graph(graph, graph_path)
+        entries.append(
+            {
+                "document_id": graph.document_id,
+                "source_sha256": graph.source_sha256,
+                "schema_version": graph.schema_version,
+                "extraction_version": graph.extraction_version,
+                "graph_fingerprint": graph_fingerprint(graph),
+                "page_count": len(page_texts),
+                "graph_path": str(graph_path.resolve()),
+            }
+        )
+    manifest_path = output_dir / "graph-manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "stage": "graph",
+            "config_hash": config.effective_hash(),
+            "entries": entries,
+        },
+    )
+    return manifest_path
+
+
+def load_graph_manifest(path: Path) -> dict[str, DocumentGraph]:
+    """Load graphs only when every manifest and artifact identity agrees."""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid graph manifest: {path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("unsupported graph manifest schema")
+    if payload.get("stage") != "graph":
+        raise ValueError("unsupported graph manifest")
+    if not isinstance(payload.get("config_hash"), str) or not payload["config_hash"]:
+        raise ValueError("graph manifest config hash is required")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("graph manifest entries must be a list")
+
+    graphs: dict[str, DocumentGraph] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid graph manifest entry")
+        document_id = entry.get("document_id")
+        source_sha256 = entry.get("source_sha256")
+        if not isinstance(document_id, str) or not document_id:
+            raise ValueError("graph manifest document ID is required")
+        if document_id in graphs:
+            raise ValueError(f"duplicate graph document: {document_id}")
+        if not isinstance(source_sha256, str) or not source_sha256:
+            raise ValueError("graph manifest source hash is required")
+        if entry.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("graph manifest graph schema identity does not match")
+        graph_path = entry.get("graph_path")
+        if not isinstance(graph_path, str) or not graph_path:
+            raise ValueError("graph manifest graph path is required")
+        resolved_graph_path = Path(graph_path)
+        if not resolved_graph_path.is_absolute():
+            resolved_graph_path = Path(path).parent / resolved_graph_path
+        graph = read_graph(resolved_graph_path, expected_source_sha256=source_sha256)
+        if graph.document_id != document_id:
+            raise ValueError("graph manifest document identity does not match graph")
+        if graph.extraction_version != entry.get("extraction_version"):
+            raise ValueError("graph manifest extraction identity does not match graph")
+        if graph_fingerprint(graph) != entry.get("graph_fingerprint"):
+            raise ValueError("graph manifest fingerprint does not match graph")
+        if len([node for node in graph.nodes if node.kind == "page"]) != entry.get("page_count"):
+            raise ValueError("graph manifest page count does not match graph")
+        graphs[document_id] = graph
+    return graphs
 
 
 def build_indexes(
@@ -1018,9 +1130,11 @@ def build_run_manifest(
 
 __all__ = [
     "answer_questions",
+    "build_graphs",
     "build_indexes",
     "build_run_manifest",
     "ocr_questions",
+    "load_graph_manifest",
     "resolve_checkpoint",
     "rerank_questions",
     "retrieve_questions",
