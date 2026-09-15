@@ -153,3 +153,47 @@ def test_qwen_reranker_adapter_uses_pair_scoring_backend(tmp_path: Path):
 
 def test_page_reranker_is_a_protocol():
     assert hasattr(PageReranker, "rank")
+
+
+def test_selection_uses_persisted_candidates_without_searching_index(tmp_path: Path):
+    """Catches graph-expanded candidates being replaced by a fresh index search."""
+
+    pages = [make_page(tmp_path, page_id) for page_id in range(3)]
+    index = make_index(tmp_path, pages)
+    question = SafeQuestion(document_id="doc-a", question="Q")
+    reranker = FakeReranker([(2, 0.9), (0, 0.8)])
+    retrieved = [
+        RankedPage(page_id=2, score=0.4, rank=1, stage="screen"),
+        RankedPage(page_id=0, score=0.3, rank=2, stage="screen"),
+    ]
+
+    manifest = select_page_manifest(
+        question, index, reranker, candidate_k=2, selected_k=2, retrieved=retrieved
+    )
+
+    assert [page.page_id for page in reranker.seen[0][1]] == [2, 0]
+    assert [entry.page_id for entry in manifest.candidates] == [2, 0]
+
+
+@pytest.mark.parametrize(
+    "retrieved",
+    [
+        [
+            RankedPage(page_id=0, score=0.4, rank=1, stage="screen"),
+            RankedPage(page_id=0, score=0.3, rank=2, stage="screen"),
+        ],
+        [RankedPage.model_construct(page_id=0, score=float("nan"), rank=1, stage="screen")],
+        [RankedPage.model_construct(page_id=0, score=0.4, rank=0, stage="screen")],
+    ],
+)
+def test_selection_rejects_invalid_persisted_candidates(tmp_path: Path, retrieved):
+    page = make_page(tmp_path, 0)
+    with pytest.raises(ValueError):
+        select_page_manifest(
+            SafeQuestion(document_id="doc-a", question="Q"),
+            make_index(tmp_path, [page]),
+            FakeReranker([(0, 0.8)]),
+            candidate_k=1,
+            selected_k=1,
+            retrieved=retrieved,
+        )

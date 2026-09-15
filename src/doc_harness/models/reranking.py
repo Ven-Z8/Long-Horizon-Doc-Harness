@@ -240,14 +240,14 @@ def select_page_manifest(
     selected_k: int = 6,
     *,
     query_vector: Any | None = None,
+    retrieved: Sequence[RankedPage] | None = None,
 ) -> SelectionManifest:
     """Retrieve candidates, rerank them, and persist both score spaces.
 
-    ``query_vector`` is optional for compatibility with callers that already
-    materialized a candidate list.  Supplying it enables exact cosine
-    screening; when omitted, the index returns document-scoped candidates with
-    neutral screening scores so a reranker can still be exercised in a
-    separate phase.
+    ``query_vector`` is optional for compatibility with separate reranking
+    phases.  ``retrieved`` lets graph expansion supply persisted screening
+    candidates directly; when it is omitted, the established document-scoped
+    ``index.search`` path remains unchanged.
     """
 
     candidate_limit = _check_top_k(candidate_k)
@@ -258,16 +258,22 @@ def select_page_manifest(
         except (TypeError, ValueError) as exc:
             raise ValueError("question must contain only document_id and question") from exc
 
-    retrieved = index.search(
-        query_vector,
-        candidate_limit,
-        document_id=question.document_id,
-    )
+    retrieved_from_index = retrieved is None
+    if retrieved is None:
+        retrieved = index.search(
+            query_vector,
+            candidate_limit,
+            document_id=question.document_id,
+        )
     retrieval_by_id: dict[int, RankedPage] = {}
     for item in retrieved:
+        if not isinstance(item, RankedPage):
+            raise ValueError("retrieved candidates must contain RankedPage values")
         if item.page_id in retrieval_by_id:
-            continue
+            raise ValueError(f"retrieved candidates contain duplicate page: {item.page_id}")
         score = _finite_score(item.score)
+        if item.rank < 1:
+            raise ValueError("retrieved candidate ranks must be one-based")
         retrieval_by_id[item.page_id] = RankedPage(
             page_id=item.page_id,
             score=score,
@@ -302,9 +308,10 @@ def select_page_manifest(
     if missing_asset is not None:
         raise FileNotFoundError(f"page asset does not exist: {missing_asset.image_path}")
 
+    candidate_ids = sorted(candidate_pages) if retrieved_from_index else list(candidate_pages)
     ranked_output = reranker.rank(
         question,
-        [candidate_pages[page_id] for page_id in sorted(candidate_pages)],
+        [candidate_pages[page_id] for page_id in candidate_ids],
     )
     if isinstance(ranked_output, (str, bytes)):
         raise ValueError("reranker returned a non-sequence of ranked pages")
@@ -328,7 +335,7 @@ def select_page_manifest(
             )
         ranked_output = [
             {"page_id": page_id, "score": score}
-            for page_id, score in zip(sorted(candidate_pages), ranked_output)
+            for page_id, score in zip(candidate_ids, ranked_output)
         ]
     rerank_by_id = _validate_candidate_scores(
         ranked_output, candidate_pages, retrieval_by_id
