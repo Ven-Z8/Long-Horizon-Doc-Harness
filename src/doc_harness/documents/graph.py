@@ -14,6 +14,7 @@ from ..core.contracts import StrictModel
 
 STRUCTURAL_RELATIONS = {"contains", "child_of", "follows", "adjacent_to"}
 SEMANTIC_RELATIONS = {
+    "refers_to",
     "defines",
     "supports",
     "qualifies",
@@ -22,7 +23,6 @@ SEMANTIC_RELATIONS = {
 }
 
 _PAGE_REFERENCE = re.compile(r"(?:page|p\.)\s+(\d+)", re.IGNORECASE)
-_SENTENCE = re.compile(r"[^.!?]+[.!?]|[^.!?]+$", re.DOTALL)
 
 
 class GraphNode(StrictModel):
@@ -73,6 +73,8 @@ class GraphEdge(StrictModel):
             not self.page_ids or not (self.quote or "").strip()
         ):
             raise ValueError("semantic edge requires page_ids and quote provenance")
+        if self.relation == "refers_to" and len(self.page_ids) != 1:
+            raise ValueError("refers_to edge requires exactly one source page ID")
         return self
 
 
@@ -171,20 +173,19 @@ def build_document_graph(
         )
 
     for page_id, text in enumerate(normalized_texts):
-        for sentence in _sentences_with_page_references(text):
-            for match in _PAGE_REFERENCE.finditer(sentence):
-                target_page_id = int(match.group(1)) - 1
-                if 0 <= target_page_id < len(normalized_texts):
-                    edges.append(
-                        GraphEdge(
-                            source_id=_page_node_id(document_id, page_id),
-                            relation="refers_to",
-                            target_id=_page_node_id(document_id, target_page_id),
-                            page_ids=[page_id],
-                            quote=sentence,
-                            source_locator="page-text",
-                        )
+        for match in _PAGE_REFERENCE.finditer(text):
+            target_page_id = int(match.group(1)) - 1
+            if 0 <= target_page_id < len(normalized_texts):
+                edges.append(
+                    GraphEdge(
+                        source_id=_page_node_id(document_id, page_id),
+                        relation="refers_to",
+                        target_id=_page_node_id(document_id, target_page_id),
+                        page_ids=[page_id],
+                        quote=_enclosing_sentence(text, match.start(), match.end()),
+                        source_locator="page-text",
                     )
+                )
 
     nodes.sort(key=lambda node: (node.kind != "document", node.page_ids, node.node_id))
     relation_order = {"contains": 0, "follows": 1, "refers_to": 2}
@@ -239,12 +240,17 @@ def _page_node_id(document_id: str, page_id: int) -> str:
     return f"{document_id}:page:{page_id}"
 
 
-def _sentences_with_page_references(text: str) -> list[str]:
-    return [
-        match.group(0).strip()
-        for match in _SENTENCE.finditer(text)
-        if _PAGE_REFERENCE.search(match.group(0))
+def _enclosing_sentence(text: str, match_start: int, match_end: int) -> str:
+    """Return the source sentence around a match without splitting ``p. 3``."""
+
+    start = max(text.rfind(delimiter, 0, match_start) for delimiter in ".!?") + 1
+    end_candidates = [
+        position
+        for delimiter in ".!?"
+        if (position := text.find(delimiter, match_end)) >= 0
     ]
+    end = min(end_candidates) + 1 if end_candidates else len(text)
+    return text[start:end].strip()
 
 
 def _write_json(path: Path, payload: object) -> None:

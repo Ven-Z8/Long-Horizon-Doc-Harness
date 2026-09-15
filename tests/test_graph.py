@@ -173,6 +173,48 @@ def test_graph_json_round_trip_rejects_changed_source_hash(tmp_path: Path):
         read_graph(path, expected_source_sha256="changed-source-hash")
 
 
+def test_build_document_graph_preserves_p_dot_references_and_ignores_out_of_range_pages():
+    """Catches sentence splitting that loses abbreviated page references."""
+
+    graph = build_document_graph(
+        "document-a.pdf",
+        ["Introduction.", "See p. 3 for the exception. See p. 99 for an appendix.", "Exception."],
+        source_sha256="source-hash",
+        extraction_version="graph-v1",
+    )
+
+    references = [edge for edge in graph.edges if edge.relation == "refers_to"]
+    assert [(edge.target_id, edge.quote) for edge in references] == [
+        ("document-a.pdf:page:2", "See p. 3 for the exception.")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("page_ids", "quote"),
+    [([], "See page 2."), ([-1], "See page 2."), ([1, 2], "See page 2."), ([1], " \t ")],
+)
+def test_read_graph_rejects_malformed_refers_to_provenance(
+    tmp_path: Path, page_ids: list[int], quote: str
+):
+    """Catches persisted references without exactly one source page and quote."""
+
+    graph = build_document_graph(
+        "document-a.pdf",
+        ["See page 2.", "Target."],
+        source_sha256="source-hash",
+        extraction_version="graph-v1",
+    )
+    payload = graph.model_dump(mode="json")
+    reference = next(edge for edge in payload["edges"] if edge["relation"] == "refers_to")
+    reference["page_ids"] = page_ids
+    reference["quote"] = quote
+    path = tmp_path / "malformed-graph.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid graph artifact"):
+        read_graph(path)
+
+
 def test_build_graphs_writes_and_validates_document_scoped_manifest(tmp_path: Path):
     """Catches graph artifacts that omit source, parser, or configuration identity."""
 
