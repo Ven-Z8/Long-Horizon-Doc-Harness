@@ -46,6 +46,25 @@ class RetrievalConfig(StrictModel):
     reranker_revision: str = "4bd860ac4f15ad1897a214615cccc700f8f71818"
 
 
+class GraphConfig(StrictModel):
+    enabled: bool = False
+    max_hops: int = Field(default=2, ge=0, le=4)
+    max_candidates: int = Field(default=40, gt=0)
+    require_connection: bool = False
+    allowed_relations: list[str] = Field(
+        default_factory=lambda: [
+            "contains",
+            "follows",
+            "refers_to",
+            "defines",
+            "supports",
+            "qualifies",
+            "contradicts",
+        ]
+    )
+    extraction_version: str = "graph-v1"
+
+
 class OCRConfig(StrictModel):
     enabled: bool = False
     model_id: str = "baidu/Qianfan-OCR"
@@ -94,6 +113,7 @@ class HarnessConfig(StrictModel):
     render: RenderConfig = Field(default_factory=RenderConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    graph: GraphConfig = Field(default_factory=GraphConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
