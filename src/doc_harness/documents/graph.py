@@ -93,10 +93,17 @@ class DocumentGraph(StrictModel):
             raise ValueError("duplicate node ID")
         if any(node.document_id != self.document_id for node in self.nodes):
             raise ValueError("node page provenance must use the same document")
-        known_ids = set(node_ids)
+        nodes_by_id = {node.node_id: node for node in self.nodes}
+        known_ids = set(nodes_by_id)
         for edge in self.edges:
             if edge.source_id not in known_ids or edge.target_id not in known_ids:
                 raise ValueError("unknown edge endpoint")
+            if edge.relation == "refers_to":
+                source_node = nodes_by_id[edge.source_id]
+                if source_node.kind != "page" or source_node.page_ids != edge.page_ids:
+                    raise ValueError(
+                        "refers_to source must be a page node matching its source page ID"
+                    )
         return self
 
 

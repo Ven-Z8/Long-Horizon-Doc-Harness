@@ -215,6 +215,28 @@ def test_read_graph_rejects_malformed_refers_to_provenance(
         read_graph(path)
 
 
+@pytest.mark.parametrize("source_id", ["document-a.pdf:page:1", "document-a.pdf"])
+def test_read_graph_rejects_refers_to_with_non_source_page_node(
+    tmp_path: Path, source_id: str
+):
+    """Catches references whose source node does not match their source-page evidence."""
+
+    graph = build_document_graph(
+        "document-a.pdf",
+        ["See page 2.", "Target."],
+        source_sha256="source-hash",
+        extraction_version="graph-v1",
+    )
+    payload = graph.model_dump(mode="json")
+    reference = next(edge for edge in payload["edges"] if edge["relation"] == "refers_to")
+    reference["source_id"] = source_id
+    path = tmp_path / "mismatched-reference-source.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid graph artifact"):
+        read_graph(path)
+
+
 def test_build_graphs_writes_and_validates_document_scoped_manifest(tmp_path: Path):
     """Catches graph artifacts that omit source, parser, or configuration identity."""
 
