@@ -8,6 +8,15 @@ from pydantic import Field, model_validator
 
 from ..core.contracts import StrictModel
 
+STRUCTURAL_RELATIONS = {"contains", "child_of", "follows", "adjacent_to"}
+SEMANTIC_RELATIONS = {
+    "defines",
+    "supports",
+    "qualifies",
+    "contradicts",
+    "depends_on",
+}
+
 
 class GraphNode(StrictModel):
     node_id: str = Field(min_length=1)
@@ -51,13 +60,11 @@ class GraphEdge(StrictModel):
     def validate_provenance(self) -> "GraphEdge":
         if any(page_id < 0 for page_id in self.page_ids):
             raise ValueError("page IDs must be greater than or equal to 0")
-        if self.relation in {
-            "defines",
-            "supports",
-            "qualifies",
-            "contradicts",
-            "depends_on",
-        } and (not self.page_ids or not self.quote):
+        if self.relation in STRUCTURAL_RELATIONS and not (self.source_locator or "").strip():
+            raise ValueError("structural edge requires source_locator provenance")
+        if self.relation in SEMANTIC_RELATIONS and (
+            not self.page_ids or not (self.quote or "").strip()
+        ):
             raise ValueError("semantic edge requires page_ids and quote provenance")
         return self
 

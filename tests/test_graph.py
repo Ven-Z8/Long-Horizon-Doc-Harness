@@ -36,7 +36,14 @@ def test_document_graph_rejects_unknown_edge_endpoint():
     with pytest.raises(ValueError, match="unknown edge endpoint"):
         _graph(
             nodes=[_node("page-1")],
-            edges=[GraphEdge(source_id="page-1", relation="follows", target_id="missing")],
+            edges=[
+                GraphEdge(
+                    source_id="page-1",
+                    relation="follows",
+                    target_id="missing",
+                    source_locator="page-order",
+                )
+            ],
         )
 
 
@@ -47,6 +54,34 @@ def test_document_graph_rejects_semantic_edge_without_provenance():
         _graph(
             nodes=[_node("claim-1"), _node("claim-2")],
             edges=[GraphEdge(source_id="claim-1", relation="supports", target_id="claim-2")],
+        )
+
+
+def test_document_graph_rejects_semantic_edge_with_whitespace_only_quote():
+    """Catches semantic claims with an empty quote disguised as whitespace."""
+
+    with pytest.raises(ValueError, match="provenance"):
+        _graph(
+            nodes=[_node("claim-1"), _node("claim-2")],
+            edges=[
+                GraphEdge(
+                    source_id="claim-1",
+                    relation="supports",
+                    target_id="claim-2",
+                    page_ids=[1],
+                    quote=" \t ",
+                )
+            ],
+        )
+
+
+def test_document_graph_rejects_structural_edge_without_locator():
+    """Catches structural relationships that have no deterministic origin."""
+
+    with pytest.raises(ValueError, match="source_locator"):
+        _graph(
+            nodes=[_node("page-1"), _node("page-2")],
+            edges=[GraphEdge(source_id="page-1", relation="adjacent_to", target_id="page-2")],
         )
 
 
