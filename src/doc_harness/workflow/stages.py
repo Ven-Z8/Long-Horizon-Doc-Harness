@@ -454,6 +454,20 @@ def _graph_manifest_for_enabled_run(
         return None, fingerprint, f"{type(exc).__name__}: {exc}"
 
 
+def _graph_eligibility_error(
+    config: HarnessConfig, index: PageIndex, graph: DocumentGraph
+) -> str | None:
+    """Return the reason a graph cannot safely serve a page index."""
+
+    if graph.document_id != index.identity.document_id:
+        return "graph document ID does not match page index"
+    if graph.source_sha256 != index.identity.pdf_sha256:
+        return "graph source hash does not match page index"
+    if graph.extraction_version != config.graph.extraction_version:
+        return "graph extraction version does not match configuration"
+    return None
+
+
 def _graph_relation_types(
     graph: DocumentGraph,
     candidate_page_ids: Sequence[int],
@@ -524,6 +538,16 @@ def _persisted_candidates(row: Mapping[str, Any], document_id: str) -> list[Rank
     return candidates
 
 
+def _ocr_page_pool(manifest: SelectionManifest, *, max_pages: int) -> list[int]:
+    """Keep selected evidence first before filling a bounded OCR pool."""
+
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+    ordered = [entry.page_id for entry in manifest.selected]
+    ordered.extend(entry.page_id for entry in manifest.candidates)
+    return list(dict.fromkeys(ordered))[:max_pages]
+
+
 def retrieve_questions(
     config: HarnessConfig,
     samples_path: Path,
@@ -584,6 +608,7 @@ def retrieve_questions(
                     "expanded_page_ids": [],
                     "relation_types": [],
                     "cache_status": "loaded",
+                    "eligible": True,
                     "terminal_reason": "no_new_graph_candidates",
                 }
                 graph = graphs.get(sample.doc_id) if graphs is not None else None
@@ -592,8 +617,9 @@ def retrieve_questions(
                         raise ValueError(graph_load_failure)
                     if graph is None:
                         raise ValueError(f"no graph for document: {sample.doc_id}")
-                    if graph.extraction_version != config.graph.extraction_version:
-                        raise ValueError("graph extraction version does not match configuration")
+                    eligibility_error = _graph_eligibility_error(config, index, graph)
+                    if eligibility_error is not None:
+                        raise ValueError(eligibility_error)
                     expanded_ids = expand_graph_candidates(
                         seed_ids,
                         graph,
@@ -640,6 +666,7 @@ def retrieve_questions(
                     graph_metadata.update(
                         {
                             "cache_status": "fallback",
+                            "eligible": False,
                             "terminal_reason": "graph_failure",
                             "failure": f"{type(exc).__name__}: {exc}",
                         }
@@ -741,49 +768,69 @@ def rerank_questions(
                     candidates=entries,
                     selected=entries[: config.retrieval.selected_k],
                 )
-            graph_metadata = row.get("graph") if config.graph.enabled else None
-            if config.graph.enabled and isinstance(graph_metadata, dict):
-                graph_metadata = dict(graph_metadata)
+            graph_metadata: dict[str, Any] | None = None
+            if config.graph.enabled:
+                raw_graph_metadata = row.get("graph")
+                graph_metadata = (
+                    dict(raw_graph_metadata)
+                    if isinstance(raw_graph_metadata, dict)
+                    else {"eligible": True, "cache_status": "loaded"}
+                )
                 graph_metadata["manifest_fingerprint"] = graph_manifest_fingerprint
-                graph = graphs.get(doc_id) if graphs is not None else None
-                try:
-                    if graph_load_failure is not None:
-                        raise ValueError(graph_load_failure)
-                    if graph is None:
-                        raise ValueError(f"no graph for document: {doc_id}")
-                    connected = select_connected_pages(
-                        [
-                            RankedPage(
-                                page_id=item.page_id,
-                                score=item.rerank_score,
-                                rank=item.rerank_rank,
-                                stage="rerank",
-                            )
-                            for item in manifest.candidates
-                        ],
-                        graph,
-                        selected_k=config.retrieval.selected_k,
-                        require_connection=config.graph.require_connection,
-                    )
-                    entries_by_id = {entry.page_id: entry for entry in manifest.candidates}
-                    manifest = manifest.model_copy(
-                        update={"selected": [entries_by_id[item.page_id] for item in connected]}
-                    )
-                    selected_ids = [item.page_id for item in manifest.selected]
+                if graph_metadata.get("eligible") is False:
                     graph_metadata.update(
                         {
-                            "selected_page_ids": selected_ids,
-                            "selected_path": _selected_graph_path(graph, selected_ids),
+                            "selected_page_ids": [item.page_id for item in manifest.selected],
+                            "selected_path": graph_metadata.get("selected_path", []),
                         }
                     )
-                except Exception as exc:
-                    graph_metadata.update(
-                        {
-                            "cache_status": "fallback",
-                            "terminal_reason": "graph_selection_failure",
-                            "failure": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
+                else:
+                    graph = graphs.get(doc_id) if graphs is not None else None
+                    try:
+                        if graph_load_failure is not None:
+                            raise ValueError(graph_load_failure)
+                        if graph is None:
+                            raise ValueError(f"no graph for document: {doc_id}")
+                        eligibility_error = _graph_eligibility_error(config, index, graph)
+                        if eligibility_error is not None:
+                            raise ValueError(eligibility_error)
+                        connected = select_connected_pages(
+                            [
+                                RankedPage(
+                                    page_id=item.page_id,
+                                    score=item.rerank_score,
+                                    rank=item.rerank_rank,
+                                    stage="rerank",
+                                )
+                                for item in manifest.candidates
+                            ],
+                            graph,
+                            selected_k=config.retrieval.selected_k,
+                            require_connection=config.graph.require_connection,
+                        )
+                        entries_by_id = {entry.page_id: entry for entry in manifest.candidates}
+                        manifest = manifest.model_copy(
+                            update={"selected": [entries_by_id[item.page_id] for item in connected]}
+                        )
+                        selected_ids = [item.page_id for item in manifest.selected]
+                        graph_metadata.update(
+                            {
+                                "eligible": True,
+                                "selected_page_ids": selected_ids,
+                                "selected_path": _selected_graph_path(graph, selected_ids),
+                            }
+                        )
+                    except Exception as exc:
+                        graph_metadata.update(
+                            {
+                                "cache_status": "fallback",
+                                "eligible": False,
+                                "terminal_reason": "graph_selection_failure",
+                                "failure": f"{type(exc).__name__}: {exc}",
+                                "selected_page_ids": [item.page_id for item in manifest.selected],
+                                "selected_path": [],
+                            }
+                        )
             manifest_path = output_dir / f"{_canonical_hash([doc_id, question.question])}.json"
             write_selection_manifest(manifest, manifest_path)
             output_row: dict[str, Any] = {
@@ -840,9 +887,16 @@ def ocr_questions(
         plan = plan_question(SafeQuestion(document_id=manifest.document_id, question=manifest.question))
         if config.verification.enabled:
             if plan.scope == "global":
-                page_ids = [page.page_id for page in index.pages[: config.verification.max_pages]]
+                page_ids = list(
+                    dict.fromkeys(
+                        [entry.page_id for entry in manifest.selected]
+                        + [page.page_id for page in index.pages]
+                    )
+                )[: config.verification.max_pages]
             else:
-                page_ids = [entry.page_id for entry in manifest.candidates[: config.verification.max_pages]]
+                page_ids = _ocr_page_pool(
+                    manifest, max_pages=config.verification.max_pages
+                )
         else:
             page_ids = [entry.page_id for entry in manifest.selected]
         requested_by_row.append((row, manifest, page_ids))
