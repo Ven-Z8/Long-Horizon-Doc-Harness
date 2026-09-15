@@ -22,6 +22,7 @@ from .models.runner import FakeRunner, ModelRunner, QwenTransformersRunner
 from .evaluation.splits import create_document_split, prepare_phase2_selection
 from .workflow.stages import (
     answer_questions,
+    build_graphs,
     build_indexes,
     build_run_manifest,
     ocr_questions,
@@ -243,6 +244,15 @@ def _parser() -> argparse.ArgumentParser:
     index.add_argument("--models-dir", type=Path, default=Path("models"))
     index.add_argument("--document-id", action="append", dest="document_ids")
 
+    graph = subparsers.add_parser(
+        "build-graph", help="build deterministic document graph artifacts"
+    )
+    graph.add_argument("--config", type=Path, default=Path("configs/experiments/graph-retrieval.toml"))
+    graph.add_argument("--documents", type=Path, default=Path("data/documents"))
+    graph.add_argument("--output", type=Path, default=Path("artifacts/graphs"))
+    graph.add_argument("--models-dir", type=Path, default=Path("models"))
+    graph.add_argument("--document-id", action="append", dest="document_ids")
+
     staged = subparsers.add_parser(
         "run-pipeline", help="run the phased embedding/reranking/OCR/answer harness"
     )
@@ -253,6 +263,7 @@ def _parser() -> argparse.ArgumentParser:
     staged.add_argument("--documents", type=Path, default=Path("data/documents"))
     staged.add_argument("--render-dir", type=Path, default=Path("cache/v2-pages"))
     staged.add_argument("--index-manifest", type=Path, default=None)
+    staged.add_argument("--graph-manifest", type=Path, default=None)
     staged.add_argument("--run-dir", type=Path, required=True)
     staged.add_argument("--models-dir", type=Path, default=Path("models"))
     staged.add_argument("--limit", type=int, default=None)
@@ -323,6 +334,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"wrote index manifest to {manifest}")
         return 0
+    if args.command == "build-graph":
+        config = load_config(args.config)
+        manifest = build_graphs(
+            config,
+            args.documents,
+            args.output,
+            document_ids=args.document_ids,
+        )
+        print(f"wrote graph manifest to {manifest}")
+        return 0
     if args.command == "run-pipeline":
         config = load_config(args.config)
         run_dir = Path(args.run_dir)
@@ -333,6 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.render_dir,
             run_dir,
             index_manifest=args.index_manifest,
+            graph_manifest=args.graph_manifest,
             models_dir=args.models_dir,
             limit=args.limit,
             resume=args.resume,

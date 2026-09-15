@@ -12,6 +12,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..core.contracts import (
     DraftAnswer,
     ModelRequest,
     Prediction,
+    RankedPage,
     RunRecord,
     SafeQuestion,
     StageFailure,
@@ -38,6 +40,7 @@ from ..documents.graph import (
     read_graph,
     write_graph,
 )
+from ..documents.graph_retrieval import expand_graph_candidates, select_connected_pages
 from ..evaluation.manifests import RunManifest, sha256_file
 from ..documents.ocr import OCRParsedPage, QianfanOCRParser, parse_cached
 from .planning import SearchState, expand_evidence, plan_question
@@ -432,6 +435,95 @@ def _index_by_document(path: Path) -> dict[str, PageIndex]:
     return result
 
 
+def _graph_manifest_for_enabled_run(
+    config: HarnessConfig, graph_manifest: Path | None
+) -> tuple[dict[str, DocumentGraph] | None, str | None, str | None]:
+    """Load a graph artifact while retaining the documented fallback behavior."""
+
+    if not config.graph.enabled:
+        return None, None, None
+    if graph_manifest is None:
+        raise ValueError("graph manifest is required when graph retrieval is enabled")
+    graph_manifest = Path(graph_manifest)
+    if not graph_manifest.is_file():
+        raise ValueError(f"graph manifest does not exist: {graph_manifest}")
+    fingerprint = sha256_file(graph_manifest)
+    try:
+        return load_graph_manifest(graph_manifest), fingerprint, None
+    except Exception as exc:
+        return None, fingerprint, f"{type(exc).__name__}: {exc}"
+
+
+def _graph_relation_types(
+    graph: DocumentGraph,
+    candidate_page_ids: Sequence[int],
+    allowed_relations: Sequence[str],
+) -> list[str]:
+    """Return the deterministic relation labels available inside a page route."""
+
+    candidate_ids = set(candidate_page_ids)
+    allowed = set(allowed_relations)
+    nodes = {node.node_id: node for node in graph.nodes}
+    relations = {
+        edge.relation
+        for edge in graph.edges
+        if edge.relation in allowed
+        and set(nodes[edge.source_id].page_ids).intersection(candidate_ids)
+        and set(nodes[edge.target_id].page_ids).intersection(candidate_ids)
+    }
+    return sorted(relations)
+
+
+def _selected_graph_path(graph: DocumentGraph, selected_page_ids: Sequence[int]) -> list[dict[str, Any]]:
+    """Serialize only provenance-bearing edges between the selected pages."""
+
+    selected_ids = set(selected_page_ids)
+    nodes = {node.node_id: node for node in graph.nodes}
+    path: list[dict[str, Any]] = []
+    for edge in graph.edges:
+        source = nodes[edge.source_id]
+        target = nodes[edge.target_id]
+        if not set(source.page_ids).intersection(selected_ids):
+            continue
+        if not set(target.page_ids).intersection(selected_ids):
+            continue
+        path.append(
+            {
+                "source_id": edge.source_id,
+                "target_id": edge.target_id,
+                "relation": edge.relation,
+                "page_ids": edge.page_ids,
+                "quote": edge.quote,
+                "source_locator": edge.source_locator,
+            }
+        )
+    return path
+
+
+def _persisted_candidates(row: Mapping[str, Any], document_id: str) -> list[RankedPage]:
+    """Validate stored retrieval candidates before handing them to reranking."""
+
+    raw_candidates = row.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("retrieval artifact candidates must be a list")
+    candidates: list[RankedPage] = []
+    seen: set[int] = set()
+    for raw in raw_candidates:
+        try:
+            candidate = RankedPage.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("retrieval artifact contains an invalid candidate") from exc
+        if candidate.page_id in seen:
+            raise ValueError(f"retrieval artifact contains duplicate page: {candidate.page_id}")
+        if not math.isfinite(candidate.score):
+            raise ValueError("retrieval artifact candidate scores must be finite")
+        seen.add(candidate.page_id)
+        candidates.append(candidate)
+    if str(row.get("doc_id")) != document_id:
+        raise ValueError("retrieval artifact document identity does not match row")
+    return candidates
+
+
 def retrieve_questions(
     config: HarnessConfig,
     samples_path: Path,
@@ -440,6 +532,7 @@ def retrieve_questions(
     *,
     models_dir: Path = Path("models"),
     limit: int | None = None,
+    graph_manifest: Path | None = None,
 ) -> Path:
     """Encode safe questions and persist document-scoped candidate pages."""
 
@@ -450,6 +543,9 @@ def retrieve_questions(
     if limit is not None and limit <= 0:
         raise ValueError("limit must be positive")
     indexes = _index_by_document(index_manifest)
+    graphs, graph_manifest_fingerprint, graph_load_failure = _graph_manifest_for_enabled_run(
+        config, graph_manifest
+    )
     checkpoint = resolve_checkpoint(config.retrieval.embedding_model_id, models_dir)
     retrieval_instruction = render_prompt("retrieval", prompt_set_for(config, "retrieval"), {})
     embedder = Qwen3VLPageEmbedder(
@@ -473,15 +569,83 @@ def retrieve_questions(
                 config.retrieval.candidate_k,
                 document_id=sample.doc_id,
             )
-            rows.append(
-                {
-                    "doc_id": sample.doc_id,
-                    "question": question.question,
-                    "query_vector": vector.tolist(),
-                    "index_fingerprint": index.fingerprint,
-                    "candidates": [item.model_dump(mode="json") for item in candidates],
+            row: dict[str, Any] = {
+                "doc_id": sample.doc_id,
+                "question": question.question,
+                "query_vector": vector.tolist(),
+                "index_fingerprint": index.fingerprint,
+                "candidates": [item.model_dump(mode="json") for item in candidates],
+            }
+            if config.graph.enabled:
+                seed_ids = [item.page_id for item in candidates]
+                graph_metadata: dict[str, Any] = {
+                    "manifest_fingerprint": graph_manifest_fingerprint,
+                    "seed_page_ids": seed_ids,
+                    "expanded_page_ids": [],
+                    "relation_types": [],
+                    "cache_status": "loaded",
+                    "terminal_reason": "no_new_graph_candidates",
                 }
-            )
+                graph = graphs.get(sample.doc_id) if graphs is not None else None
+                try:
+                    if graph_load_failure is not None:
+                        raise ValueError(graph_load_failure)
+                    if graph is None:
+                        raise ValueError(f"no graph for document: {sample.doc_id}")
+                    if graph.extraction_version != config.graph.extraction_version:
+                        raise ValueError("graph extraction version does not match configuration")
+                    expanded_ids = expand_graph_candidates(
+                        seed_ids,
+                        graph,
+                        max_hops=config.graph.max_hops,
+                        max_candidates=config.graph.max_candidates,
+                        allowed_relations=config.graph.allowed_relations,
+                    )
+                    seed_id_set = set(seed_ids)
+                    indexed_page_ids = {page.page_id for page in index.pages}
+                    additions = [
+                        page_id
+                        for page_id in expanded_ids
+                        if page_id not in seed_id_set and page_id in indexed_page_ids
+                    ]
+                    lowest_seed_score = min((item.score for item in candidates), default=0.0)
+                    expanded_candidates = [
+                        RankedPage(
+                            page_id=page_id,
+                            score=lowest_seed_score - float(offset),
+                            rank=len(candidates) + offset,
+                            stage="graph_expand",
+                        )
+                        for offset, page_id in enumerate(additions, start=1)
+                    ]
+                    candidates = [*candidates, *expanded_candidates]
+                    row["candidates"] = [item.model_dump(mode="json") for item in candidates]
+                    graph_metadata.update(
+                        {
+                            "graph_fingerprint": graph_fingerprint(graph),
+                            "expanded_page_ids": additions,
+                            "relation_types": _graph_relation_types(
+                                graph,
+                                [*seed_ids, *additions],
+                                config.graph.allowed_relations,
+                            ),
+                            "terminal_reason": (
+                                "expanded_graph_candidates"
+                                if additions
+                                else "no_new_graph_candidates"
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    graph_metadata.update(
+                        {
+                            "cache_status": "fallback",
+                            "terminal_reason": "graph_failure",
+                            "failure": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                row["graph"] = graph_metadata
+            rows.append(row)
     finally:
         _release_model(embedder)
     _write_jsonl(output_path, rows)
@@ -495,12 +659,16 @@ def rerank_questions(
     output_dir: Path,
     *,
     models_dir: Path = Path("models"),
+    graph_manifest: Path | None = None,
 ) -> Path:
     """Rerank persisted candidates and write one selection manifest per question."""
 
     if not config.retrieval.enabled:
         raise ValueError("retrieval must be enabled for the reranking phase")
     indexes = _index_by_document(index_manifest)
+    graphs, graph_manifest_fingerprint, graph_load_failure = _graph_manifest_for_enabled_run(
+        config, graph_manifest
+    )
     reranker = None
     if config.retrieval.rerank_enabled:
         checkpoint = resolve_checkpoint(config.retrieval.reranker_model_id, models_dir)
@@ -520,23 +688,36 @@ def rerank_questions(
             index = indexes.get(doc_id)
             if index is None:
                 raise FileNotFoundError(f"no page index for {doc_id}")
+            persisted = _persisted_candidates(row, doc_id) if config.graph.enabled else []
             if reranker is not None:
-                manifest = select_page_manifest(
-                    question,
-                    index,
-                    reranker,
-                    candidate_k=config.retrieval.candidate_k,
-                    selected_k=config.retrieval.selected_k,
-                    query_vector=row.get("query_vector"),
-                )
+                if config.graph.enabled:
+                    manifest = select_page_manifest(
+                        question,
+                        index,
+                        reranker,
+                        candidate_k=config.graph.max_candidates,
+                        selected_k=config.retrieval.selected_k,
+                        retrieved=persisted,
+                    )
+                else:
+                    manifest = select_page_manifest(
+                        question,
+                        index,
+                        reranker,
+                        candidate_k=config.retrieval.candidate_k,
+                        selected_k=config.retrieval.selected_k,
+                        query_vector=row.get("query_vector"),
+                    )
             else:
-                candidates = [
-                    item for item in index.search(
+                candidates = (
+                    persisted
+                    if config.graph.enabled
+                    else index.search(
                         row.get("query_vector"),
                         config.retrieval.candidate_k,
                         document_id=doc_id,
                     )
-                ]
+                )
                 entries = [
                     SelectionEntry(
                         page_id=item.page_id,
@@ -551,21 +732,69 @@ def rerank_questions(
                     document_id=doc_id,
                     question=question.question,
                     index_fingerprint=index.fingerprint,
-                    candidate_k=config.retrieval.candidate_k,
+                    candidate_k=(
+                        config.graph.max_candidates
+                        if config.graph.enabled
+                        else config.retrieval.candidate_k
+                    ),
                     selected_k=config.retrieval.selected_k,
                     candidates=entries,
                     selected=entries[: config.retrieval.selected_k],
                 )
+            graph_metadata = row.get("graph") if config.graph.enabled else None
+            if config.graph.enabled and isinstance(graph_metadata, dict):
+                graph_metadata = dict(graph_metadata)
+                graph_metadata["manifest_fingerprint"] = graph_manifest_fingerprint
+                graph = graphs.get(doc_id) if graphs is not None else None
+                try:
+                    if graph_load_failure is not None:
+                        raise ValueError(graph_load_failure)
+                    if graph is None:
+                        raise ValueError(f"no graph for document: {doc_id}")
+                    connected = select_connected_pages(
+                        [
+                            RankedPage(
+                                page_id=item.page_id,
+                                score=item.rerank_score,
+                                rank=item.rerank_rank,
+                                stage="rerank",
+                            )
+                            for item in manifest.candidates
+                        ],
+                        graph,
+                        selected_k=config.retrieval.selected_k,
+                        require_connection=config.graph.require_connection,
+                    )
+                    entries_by_id = {entry.page_id: entry for entry in manifest.candidates}
+                    manifest = manifest.model_copy(
+                        update={"selected": [entries_by_id[item.page_id] for item in connected]}
+                    )
+                    selected_ids = [item.page_id for item in manifest.selected]
+                    graph_metadata.update(
+                        {
+                            "selected_page_ids": selected_ids,
+                            "selected_path": _selected_graph_path(graph, selected_ids),
+                        }
+                    )
+                except Exception as exc:
+                    graph_metadata.update(
+                        {
+                            "cache_status": "fallback",
+                            "terminal_reason": "graph_selection_failure",
+                            "failure": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
             manifest_path = output_dir / f"{_canonical_hash([doc_id, question.question])}.json"
             write_selection_manifest(manifest, manifest_path)
-            rows.append(
-                {
-                    "doc_id": doc_id,
-                    "question": question.question,
-                    "manifest_path": str(manifest_path),
-                    "manifest_fingerprint": manifest.fingerprint,
-                }
-            )
+            output_row: dict[str, Any] = {
+                "doc_id": doc_id,
+                "question": question.question,
+                "manifest_path": str(manifest_path),
+                "manifest_fingerprint": manifest.fingerprint,
+            }
+            if graph_metadata is not None:
+                output_row["graph"] = graph_metadata
+            rows.append(output_row)
     finally:
         _release_model(reranker)
     output_path = output_dir / "reranked.jsonl"
@@ -999,6 +1228,7 @@ def answer_questions(
                 response = generation.draft.answer or "Not answerable"
             prediction = Prediction(doc_id=doc_id, question=question_text, response=response)
             predictions_by_key[(doc_id, question_text)] = prediction
+            graph_metadata = row.get("graph") if config.graph.enabled else None
             record = RunRecord(
                     run_id=uuid.uuid4().hex,
                     document_id=doc_id,
@@ -1037,6 +1267,14 @@ def answer_questions(
                             }
                             for attempt in generation_attempts
                         ],
+                        **(
+                            {
+                                "graph": graph_metadata,
+                                "selected_graph_path": graph_metadata.get("selected_path", []),
+                            }
+                            if isinstance(graph_metadata, dict)
+                            else {}
+                        ),
                     },
                 )
             records.append(record)
@@ -1088,6 +1326,7 @@ def build_run_manifest(
     samples_path: Path,
     index_manifest: Path,
     prompt: str = BASELINE_PROMPT,
+    graph_manifest: Path | None = None,
 ) -> RunManifest:
     """Create a resumable identity for a staged run."""
 
@@ -1114,12 +1353,26 @@ def build_run_manifest(
             for sample in load_v2_samples(samples_path)
         ]
     )
+    if config.graph.enabled:
+        if graph_manifest is None:
+            raise ValueError("graph manifest is required when graph retrieval is enabled")
+        graph_manifest = Path(graph_manifest)
+        if not graph_manifest.is_file():
+            raise ValueError(f"graph manifest does not exist: {graph_manifest}")
+        dataset_hash = _canonical_hash(
+            {
+                "index_manifest": sha256_file(index_manifest),
+                "graph_manifest": sha256_file(graph_manifest),
+            }
+        )
+    else:
+        dataset_hash = sha256_file(index_manifest)
     return RunManifest(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
         config_hash=config.effective_hash(),
         code_hash=code_hash,
-        dataset_hash=sha256_file(index_manifest),
+        dataset_hash=dataset_hash,
         samples_hash=sha256_file(samples_path),
         models_hash=sha256_file(models_file) if models_file.is_file() else "unknown",
         prompts_hash=_canonical_hash(prompt_identity),

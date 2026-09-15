@@ -32,6 +32,7 @@ def run_coordinator(
     run_dir: Path,
     *,
     index_manifest: Path | None = None,
+    graph_manifest: Path | None = None,
     models_dir: Path = Path("models"),
     limit: int | None = None,
     resume: bool = False,
@@ -40,6 +41,12 @@ def run_coordinator(
 ) -> Path:
     """Run retrieval, reranking, OCR, and answer stages with a preflight identity."""
 
+    if config.graph.enabled:
+        if graph_manifest is None:
+            raise ValueError("graph manifest is required when graph retrieval is enabled")
+        graph_manifest = Path(graph_manifest)
+        if not graph_manifest.is_file():
+            raise ValueError(f"graph manifest does not exist: {graph_manifest}")
     run_dir = Path(run_dir)
     if run_dir.exists() and any(run_dir.iterdir()) and not resume:
         raise FileExistsError(f"run directory is not empty: {run_dir}")
@@ -56,12 +63,14 @@ def run_coordinator(
                 run_dir / "index",
                 models_dir=models_dir,
             )
-    manifest = build_run_manifest(
-        config,
-        run_id=run_dir.name,
-        samples_path=samples_path,
-        index_manifest=index_manifest,
-    )
+    manifest_kwargs = {
+        "run_id": run_dir.name,
+        "samples_path": samples_path,
+        "index_manifest": index_manifest,
+    }
+    if config.graph.enabled:
+        manifest_kwargs["graph_manifest"] = graph_manifest
+    manifest = build_run_manifest(config, **manifest_kwargs)
     manifest_path = run_dir / "manifest.json"
     if resume and manifest_path.exists():
         existing_manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
@@ -70,20 +79,17 @@ def run_coordinator(
         _write_json(manifest_path, manifest.model_dump(mode="json"))
 
     stage_dir = run_dir / "stages"
+    retrieval_kwargs = {"models_dir": models_dir, "limit": limit}
+    if config.graph.enabled:
+        retrieval_kwargs["graph_manifest"] = graph_manifest
     retrieval_path = retrieve_questions(
-        config,
-        samples_path,
-        index_manifest,
-        stage_dir / "retrieval.jsonl",
-        models_dir=models_dir,
-        limit=limit,
+        config, samples_path, index_manifest, stage_dir / "retrieval.jsonl", **retrieval_kwargs
     )
+    rerank_kwargs = {"models_dir": models_dir}
+    if config.graph.enabled:
+        rerank_kwargs["graph_manifest"] = graph_manifest
     reranked_path = rerank_questions(
-        config,
-        retrieval_path,
-        index_manifest,
-        stage_dir / "reranked",
-        models_dir=models_dir,
+        config, retrieval_path, index_manifest, stage_dir / "reranked", **rerank_kwargs
     )
     ocr_path = ocr_questions(
         config,

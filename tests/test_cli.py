@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from doc_harness.cli import main, run_smoke
+from doc_harness.cli import _parser, main, run_smoke
 
 
 def test_smoke_writes_record_and_prediction(tmp_path: Path):
@@ -102,3 +102,29 @@ def test_compare_runs_cli_writes_report(tmp_path: Path):
     output = tmp_path / "comparison.json"
     assert main(["compare-runs", "--runs", str(run_a), str(run_b), "--output", str(output)]) == 0
     assert json.loads(output.read_text())["sample_count"] == 1
+
+
+def test_build_graph_is_registered_with_required_graph_inputs():
+    """Catches accidental removal of the offline graph-artifact CLI."""
+
+    parser = _parser()
+    help_text = parser.format_help()
+    args = parser.parse_args(
+        [
+            "build-graph",
+            "--config",
+            "graph.toml",
+            "--documents",
+            "documents",
+            "--output",
+            "graphs",
+            "--models-dir",
+            "models",
+            "--document-id",
+            "one.pdf",
+        ]
+    )
+
+    assert "build-graph" in help_text
+    assert args.command == "build-graph"
+    assert args.document_ids == ["one.pdf"]
