@@ -265,6 +265,11 @@ def select_page_manifest(
             candidate_limit,
             document_id=question.document_id,
         )
+    elif len(retrieved) > candidate_limit:
+        raise ValueError(
+            "persisted candidates exceed candidate_k: "
+            f"expected at most {candidate_limit}, got {len(retrieved)}"
+        )
     retrieval_by_id: dict[int, RankedPage] = {}
     for item in retrieved:
         if not isinstance(item, RankedPage):

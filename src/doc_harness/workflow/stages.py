@@ -36,6 +36,7 @@ from ..documents.evidence import EvidenceBudget, EvidenceBundle, build_bundle
 from ..documents.graph import (
     DocumentGraph,
     build_document_graph,
+    graph_construction_identity,
     graph_fingerprint,
     read_graph,
     write_graph,
@@ -290,13 +291,18 @@ def build_graphs(
             "schema_version": SCHEMA_VERSION,
             "stage": "graph",
             "config_hash": config.effective_hash(),
+            "construction_identity": graph_construction_identity(
+                config.graph.extraction_version
+            ),
             "entries": entries,
         },
     )
     return manifest_path
 
 
-def load_graph_manifest(path: Path) -> dict[str, DocumentGraph]:
+def load_graph_manifest(
+    path: Path, *, expected_construction_identity: str | None = None
+) -> dict[str, DocumentGraph]:
     """Load graphs only when every manifest and artifact identity agrees."""
 
     try:
@@ -309,6 +315,14 @@ def load_graph_manifest(path: Path) -> dict[str, DocumentGraph]:
         raise ValueError("unsupported graph manifest")
     if not isinstance(payload.get("config_hash"), str) or not payload["config_hash"]:
         raise ValueError("graph manifest config hash is required")
+    construction_identity = payload.get("construction_identity")
+    if not isinstance(construction_identity, str) or not construction_identity:
+        raise ValueError("graph manifest construction identity is required")
+    if (
+        expected_construction_identity is not None
+        and construction_identity != expected_construction_identity
+    ):
+        raise ValueError("graph manifest construction identity does not match configuration")
     entries = payload.get("entries")
     if not isinstance(entries, list):
         raise ValueError("graph manifest entries must be a list")
@@ -338,6 +352,8 @@ def load_graph_manifest(path: Path) -> dict[str, DocumentGraph]:
             raise ValueError("graph manifest document identity does not match graph")
         if graph.extraction_version != entry.get("extraction_version"):
             raise ValueError("graph manifest extraction identity does not match graph")
+        if graph_construction_identity(graph.extraction_version) != construction_identity:
+            raise ValueError("graph manifest construction identity does not match graph")
         if graph_fingerprint(graph) != entry.get("graph_fingerprint"):
             raise ValueError("graph manifest fingerprint does not match graph")
         if len([node for node in graph.nodes if node.kind == "page"]) != entry.get("page_count"):
@@ -449,7 +465,16 @@ def _graph_manifest_for_enabled_run(
         raise ValueError(f"graph manifest does not exist: {graph_manifest}")
     fingerprint = sha256_file(graph_manifest)
     try:
-        return load_graph_manifest(graph_manifest), fingerprint, None
+        return (
+            load_graph_manifest(
+                graph_manifest,
+                expected_construction_identity=graph_construction_identity(
+                    config.graph.extraction_version
+                ),
+            ),
+            fingerprint,
+            None,
+        )
     except Exception as exc:
         return None, fingerprint, f"{type(exc).__name__}: {exc}"
 
@@ -514,12 +539,19 @@ def _selected_graph_path(graph: DocumentGraph, selected_page_ids: Sequence[int])
     return path
 
 
-def _persisted_candidates(row: Mapping[str, Any], document_id: str) -> list[RankedPage]:
+def _persisted_candidates(
+    row: Mapping[str, Any], document_id: str, *, max_candidates: int
+) -> list[RankedPage]:
     """Validate stored retrieval candidates before handing them to reranking."""
 
     raw_candidates = row.get("candidates")
     if not isinstance(raw_candidates, list):
         raise ValueError("retrieval artifact candidates must be a list")
+    if len(raw_candidates) > max_candidates:
+        raise ValueError(
+            "retrieval artifact exceeds graph candidate cap: "
+            f"expected at most {max_candidates}, got {len(raw_candidates)}"
+        )
     candidates: list[RankedPage] = []
     seen: set[int] = set()
     for raw in raw_candidates:
@@ -625,7 +657,11 @@ def retrieve_questions(
                 "candidates": [item.model_dump(mode="json") for item in candidates],
             }
             if config.graph.enabled:
-                seed_ids = [item.page_id for item in candidates]
+                graph_seeds = candidates[: config.graph.max_candidates]
+                row["candidates"] = [
+                    item.model_dump(mode="json") for item in graph_seeds
+                ]
+                seed_ids = [item.page_id for item in graph_seeds]
                 graph_metadata: dict[str, Any] = {
                     "manifest_fingerprint": graph_manifest_fingerprint,
                     "seed_page_ids": seed_ids,
@@ -658,17 +694,17 @@ def retrieve_questions(
                         for page_id in expanded_ids
                         if page_id not in seed_id_set and page_id in indexed_page_ids
                     ]
-                    lowest_seed_score = min((item.score for item in candidates), default=0.0)
+                    lowest_seed_score = min((item.score for item in graph_seeds), default=0.0)
                     expanded_candidates = [
                         RankedPage(
                             page_id=page_id,
                             score=lowest_seed_score - float(offset),
-                            rank=len(candidates) + offset,
+                            rank=len(graph_seeds) + offset,
                             stage="graph_expand",
                         )
                         for offset, page_id in enumerate(additions, start=1)
                     ]
-                    candidates = [*candidates, *expanded_candidates]
+                    candidates = [*graph_seeds, *expanded_candidates]
                     row["candidates"] = [item.model_dump(mode="json") for item in candidates]
                     graph_metadata.update(
                         {
@@ -739,14 +775,22 @@ def rerank_questions(
             index = indexes.get(doc_id)
             if index is None:
                 raise FileNotFoundError(f"no page index for {doc_id}")
-            persisted = _persisted_candidates(row, doc_id) if config.graph.enabled else []
+            raw_graph_metadata = row.get("graph") if config.graph.enabled else None
+            graph_candidate_limit = config.graph.max_candidates
+            persisted = (
+                _persisted_candidates(
+                    row, doc_id, max_candidates=graph_candidate_limit
+                )
+                if config.graph.enabled
+                else []
+            )
             if reranker is not None:
                 if config.graph.enabled:
                     manifest = select_page_manifest(
                         question,
                         index,
                         reranker,
-                        candidate_k=config.graph.max_candidates,
+                        candidate_k=graph_candidate_limit,
                         selected_k=config.retrieval.selected_k,
                         retrieved=persisted,
                     )
@@ -784,7 +828,7 @@ def rerank_questions(
                     question=question.question,
                     index_fingerprint=index.fingerprint,
                     candidate_k=(
-                        config.graph.max_candidates
+                        graph_candidate_limit
                         if config.graph.enabled
                         else config.retrieval.candidate_k
                     ),
@@ -794,7 +838,6 @@ def rerank_questions(
                 )
             graph_metadata: dict[str, Any] | None = None
             if config.graph.enabled:
-                raw_graph_metadata = row.get("graph")
                 graph_metadata = (
                     dict(raw_graph_metadata)
                     if isinstance(raw_graph_metadata, dict)

@@ -68,6 +68,44 @@ def test_expansion_filters_relations_and_rejects_invalid_caps():
         expand_graph_candidates([], _graph(), max_hops=0, max_candidates=0, allowed_relations=[])
 
 
+def test_document_contains_hierarchy_does_not_fan_out_page_projection():
+    """Catches document hierarchy turning one seed into every contained page."""
+
+    graph = _graph()
+    document_node = GraphNode(
+        node_id="document-a.pdf",
+        document_id="document-a.pdf",
+        kind="document",
+        label="Document A",
+    )
+    graph = graph.model_copy(
+        update={
+            "nodes": [document_node, *graph.nodes],
+            "edges": [
+                *graph.edges,
+                *[
+                    GraphEdge(
+                        source_id="document-a.pdf",
+                        relation="contains",
+                        target_id=f"document-a.pdf:page:{page_id}",
+                        page_ids=[page_id],
+                        source_locator="document-page-order",
+                    )
+                    for page_id in range(4)
+                ],
+            ],
+        }
+    )
+
+    assert expand_graph_candidates(
+        [0],
+        DocumentGraph.model_validate(graph.model_dump()),
+        max_hops=2,
+        max_candidates=4,
+        allowed_relations=["contains"],
+    ) == [0]
+
+
 def test_connected_selection_prefers_adjacent_pages_then_fills_by_score():
     """Catches selection that discards graph connectivity after reranking."""
 

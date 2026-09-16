@@ -23,6 +23,8 @@ SEMANTIC_RELATIONS = {
 }
 
 _PAGE_REFERENCE = re.compile(r"(?:page|p\.)\s+(\d+)", re.IGNORECASE)
+_GRAPH_SCHEMA_VERSION = 1
+_GRAPH_BUILDER_VERSION = "deterministic-document-graph-v1"
 
 
 class GraphNode(StrictModel):
@@ -79,7 +81,7 @@ class GraphEdge(StrictModel):
 
 
 class DocumentGraph(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1] = _GRAPH_SCHEMA_VERSION
     document_id: str = Field(min_length=1)
     source_sha256: str = Field(min_length=1)
     extraction_version: str = Field(min_length=1)
@@ -98,6 +100,20 @@ class DocumentGraph(StrictModel):
         for edge in self.edges:
             if edge.source_id not in known_ids or edge.target_id not in known_ids:
                 raise ValueError("unknown edge endpoint")
+
+        page_nodes = [node for node in self.nodes if node.kind == "page"]
+        if any(len(node.page_ids) != 1 for node in page_nodes):
+            raise ValueError("page node requires exactly one page ID")
+        page_node_ids = [node.page_ids[0] for node in page_nodes]
+        if len(page_node_ids) != len(set(page_node_ids)):
+            raise ValueError("duplicate page node page ID")
+        valid_page_ids = set(page_node_ids)
+        if any(set(node.page_ids) - valid_page_ids for node in self.nodes):
+            raise ValueError("node page provenance references unknown page ID")
+        if any(set(edge.page_ids) - valid_page_ids for edge in self.edges):
+            raise ValueError("edge page provenance references unknown page ID")
+
+        for edge in self.edges:
             if edge.relation == "refers_to":
                 source_node = nodes_by_id[edge.source_id]
                 if source_node.kind != "page" or source_node.page_ids != edge.page_ids:
@@ -223,6 +239,29 @@ def graph_fingerprint(graph: DocumentGraph) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def graph_construction_identity(extraction_version: str) -> str:
+    """Hash only inputs that determine persisted graph construction.
+
+    Traversal controls such as hops, candidate limits, relation filters, and
+    connection policy are deliberately excluded so one graph can serve matched
+    retrieval ablations.
+    """
+
+    if not isinstance(extraction_version, str) or not extraction_version.strip():
+        raise ValueError("graph extraction version is required")
+    payload = {
+        "builder_version": _GRAPH_BUILDER_VERSION,
+        "schema_version": _GRAPH_SCHEMA_VERSION,
+        "extraction_version": extraction_version,
+        "node_kinds": ["document", "section", "page", "block", "claim", "entity"],
+        "structural_relations": sorted(STRUCTURAL_RELATIONS),
+        "semantic_relations": sorted(SEMANTIC_RELATIONS),
+        "page_reference_pattern": _PAGE_REFERENCE.pattern,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def write_graph(graph: DocumentGraph, path: Path) -> None:
     """Atomically write a validated graph as deterministic JSON."""
 
@@ -276,6 +315,7 @@ __all__ = [
     "GraphNode",
     "GraphSearchState",
     "build_document_graph",
+    "graph_construction_identity",
     "graph_fingerprint",
     "read_graph",
     "write_graph",

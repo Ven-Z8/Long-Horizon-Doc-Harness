@@ -7,7 +7,11 @@ import pytest
 
 from doc_harness.contracts import Page
 from doc_harness.core.config import HarnessConfig
-from doc_harness.documents.graph import build_document_graph
+from doc_harness.documents.graph import (
+    build_document_graph,
+    graph_fingerprint,
+    write_graph,
+)
 from doc_harness.models.reranking import (
     SelectionEntry,
     SelectionManifest,
@@ -271,6 +275,204 @@ def test_rerank_keeps_ordinary_selection_after_retrieval_graph_fallback(tmp_path
     assert [entry.page_id for entry in manifest.selected] == [0, 1]
     assert row["graph"]["eligible"] is False
     assert row["graph"]["terminal_reason"] == "graph_failure"
+
+
+def test_graph_retrieval_caps_seed_union_when_max_candidates_is_smaller_than_candidate_k(
+    tmp_path: Path, monkeypatch
+):
+    """Catches embedding seeds bypassing the graph candidate-union cap."""
+
+    config = HarnessConfig.model_validate(
+        {
+            "model": {"model_id": "m", "revision": "r"},
+            "retrieval": {"enabled": True, "candidate_k": 4, "selected_k": 2},
+            "graph": {"enabled": True, "max_candidates": 2},
+        }
+    )
+    index = _index(tmp_path, source_sha256="pdf-bytes", page_count=4)
+    graph = build_document_graph(
+        "d.pdf",
+        ["one", "two", "three", "four"],
+        source_sha256="pdf-bytes",
+        extraction_version="graph-v1",
+    )
+    samples = tmp_path / "samples.json"
+    samples.write_text(json.dumps([{"doc_id": "d.pdf", "question": "Q", "answer": "A"}]))
+
+    class _Embedder:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def encode_questions(self, _questions):
+            return [np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)]
+
+    monkeypatch.setattr(stages, "_index_by_document", lambda _path: {"d.pdf": index})
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda *_args: tmp_path)
+    monkeypatch.setattr(stages, "Qwen3VLPageEmbedder", _Embedder)
+    monkeypatch.setattr(
+        stages,
+        "_graph_manifest_for_enabled_run",
+        lambda *_args: ({"d.pdf": graph}, "manifest-fingerprint", None),
+    )
+
+    output = stages.retrieve_questions(
+        config,
+        samples,
+        tmp_path / "index-manifest.json",
+        tmp_path / "retrieval.jsonl",
+        graph_manifest=tmp_path / "graph-manifest.json",
+    )
+
+    row = json.loads(output.read_text())
+    assert [item["page_id"] for item in row["candidates"]] == [0, 1]
+    assert row["graph"]["seed_page_ids"] == [0, 1]
+
+
+def test_persisted_graph_candidates_reject_lists_over_graph_cap():
+    """Catches tampered retrieval artifacts bypassing the reranking cap."""
+
+    row = {
+        "doc_id": "d.pdf",
+        "candidates": [
+            {"page_id": page_id, "score": 1.0 - page_id / 10, "rank": page_id + 1, "stage": "screen"}
+            for page_id in range(3)
+        ],
+    }
+
+    with pytest.raises(ValueError, match="graph candidate cap"):
+        stages._persisted_candidates(row, "d.pdf", max_candidates=2)
+
+
+def test_rerank_rejects_oversized_graph_fallback_candidate_list(
+    tmp_path: Path, monkeypatch
+):
+    """Catches fallback metadata being used to bypass the graph cap at reranking."""
+
+    config = HarnessConfig.model_validate(
+        {
+            "model": {"model_id": "m", "revision": "r"},
+            "retrieval": {
+                "enabled": True,
+                "rerank_enabled": False,
+                "candidate_k": 3,
+                "selected_k": 1,
+            },
+            "graph": {"enabled": True, "max_candidates": 2},
+        }
+    )
+    index = _index(tmp_path, source_sha256="pdf-bytes", page_count=3)
+    graph = build_document_graph(
+        "d.pdf", ["one", "two", "three"], "pdf-bytes", "graph-v1"
+    )
+    retrieval_path = tmp_path / "retrieval.jsonl"
+    retrieval_path.write_text(
+        json.dumps(
+            {
+                "doc_id": "d.pdf",
+                "question": "Q",
+                "candidates": [
+                    {
+                        "page_id": page_id,
+                        "score": 1.0 - page_id / 10,
+                        "rank": page_id + 1,
+                        "stage": "screen",
+                    }
+                    for page_id in range(3)
+                ],
+                "graph": {"eligible": False, "cache_status": "fallback"},
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(stages, "_index_by_document", lambda _path: {"d.pdf": index})
+    monkeypatch.setattr(
+        stages,
+        "_graph_manifest_for_enabled_run",
+        lambda *_args: ({"d.pdf": graph}, "manifest-fingerprint", None),
+    )
+
+    with pytest.raises(ValueError, match="graph candidate cap"):
+        stages.rerank_questions(
+            config,
+            retrieval_path,
+            tmp_path / "index-manifest.json",
+            tmp_path / "reranked",
+            graph_manifest=tmp_path / "graph-manifest.json",
+        )
+
+
+def test_graph_construction_identity_mismatch_falls_back_with_metadata(
+    tmp_path: Path, monkeypatch
+):
+    """Catches incompatible graph construction being used instead of ordinary retrieval."""
+
+    config = HarnessConfig.model_validate(
+        {
+            "model": {"model_id": "m", "revision": "r"},
+            "retrieval": {"enabled": True, "candidate_k": 2, "selected_k": 1},
+            "graph": {
+                "enabled": True,
+                "max_candidates": 1,
+                "extraction_version": "graph-v1",
+            },
+        }
+    )
+    index = _index(tmp_path, source_sha256="pdf-bytes", page_count=2)
+    graph = build_document_graph(
+        "d.pdf", ["one", "two"], source_sha256="pdf-bytes", extraction_version="graph-v1"
+    )
+    graph_path = tmp_path / "d.pdf.graph.json"
+    write_graph(graph, graph_path)
+    graph_manifest = tmp_path / "graph-manifest.json"
+    graph_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "graph",
+                "config_hash": "full-build-config-hash",
+                "construction_identity": "wrong-construction-identity",
+                "entries": [
+                    {
+                        "document_id": graph.document_id,
+                        "source_sha256": graph.source_sha256,
+                        "schema_version": graph.schema_version,
+                        "extraction_version": graph.extraction_version,
+                        "graph_fingerprint": graph_fingerprint(graph),
+                        "page_count": 2,
+                        "graph_path": str(graph_path),
+                    }
+                ],
+            }
+        )
+    )
+    samples = tmp_path / "samples.json"
+    samples.write_text(json.dumps([{"doc_id": "d.pdf", "question": "Q", "answer": "A"}]))
+
+    class _Embedder:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def encode_questions(self, _questions):
+            return [np.array([1.0, 0.0], dtype=np.float32)]
+
+    monkeypatch.setattr(stages, "_index_by_document", lambda _path: {"d.pdf": index})
+    monkeypatch.setattr(stages, "resolve_checkpoint", lambda *_args: tmp_path)
+    monkeypatch.setattr(stages, "Qwen3VLPageEmbedder", _Embedder)
+
+    output = stages.retrieve_questions(
+        config,
+        samples,
+        tmp_path / "index-manifest.json",
+        tmp_path / "retrieval.jsonl",
+        graph_manifest=graph_manifest,
+    )
+
+    row = json.loads(output.read_text())
+    assert [item["page_id"] for item in row["candidates"]] == [0]
+    assert row["graph"]["eligible"] is False
+    assert row["graph"]["cache_status"] == "fallback"
+    assert row["graph"]["terminal_reason"] == "graph_failure"
+    assert "construction identity" in row["graph"]["failure"]
 
 
 def _write_config(path: Path, *, graph_enabled: bool) -> Path:

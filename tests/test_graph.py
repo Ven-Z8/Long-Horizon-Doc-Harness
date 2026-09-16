@@ -4,15 +4,19 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from doc_harness.core.config import HarnessConfig
 from doc_harness.documents.graph import (
     DocumentGraph,
     GraphEdge,
     GraphNode,
     GraphSearchState,
     build_document_graph,
+    graph_construction_identity,
+    graph_fingerprint,
     read_graph,
     write_graph,
 )
+from doc_harness.workflow import stages
 from doc_harness.workflow.stages import build_graphs, load_graph_manifest
 
 
@@ -102,6 +106,67 @@ def test_document_graph_rejects_duplicate_node_ids():
 
     with pytest.raises(ValueError, match="duplicate node ID"):
         _graph(nodes=[_node("page-1"), _node("page-1")], edges=[])
+
+
+def test_document_graph_rejects_duplicate_page_node_page_ids():
+    """Catches two page nodes claiming the same document page."""
+
+    with pytest.raises(ValueError, match="duplicate page node page ID"):
+        _graph(
+            nodes=[
+                _node("page-1", page_ids=[0]),
+                _node("page-1-alias", page_ids=[0]),
+            ],
+            edges=[],
+        )
+
+
+@pytest.mark.parametrize("page_ids", [[], [0, 1]])
+def test_document_graph_requires_one_page_id_per_page_node(page_ids: list[int]):
+    """Catches page nodes that cannot define one unambiguous page identity."""
+
+    with pytest.raises(ValueError, match="page node requires exactly one page ID"):
+        _graph(nodes=[_node("page-1", page_ids=page_ids)], edges=[])
+
+
+def test_document_graph_rejects_node_page_provenance_outside_page_nodes():
+    """Catches node provenance for a page absent from the graph's page inventory."""
+
+    with pytest.raises(ValueError, match="node page provenance references unknown page ID"):
+        _graph(
+            nodes=[
+                _node("page-1", page_ids=[0]),
+                GraphNode(
+                    node_id="claim-1",
+                    document_id="document-a",
+                    kind="claim",
+                    label="Claim",
+                    page_ids=[1],
+                ),
+            ],
+            edges=[],
+        )
+
+
+def test_document_graph_rejects_edge_page_provenance_outside_page_nodes():
+    """Catches edge provenance for a page absent from the graph's page inventory."""
+
+    with pytest.raises(ValueError, match="edge page provenance references unknown page ID"):
+        _graph(
+            nodes=[
+                _node("page-1", page_ids=[0]),
+                _node("page-2", page_ids=[1]),
+            ],
+            edges=[
+                GraphEdge(
+                    source_id="page-1",
+                    relation="supports",
+                    target_id="page-2",
+                    page_ids=[2],
+                    quote="Unsupported provenance.",
+                )
+            ],
+        )
 
 
 def test_document_graph_rejects_cross_document_node_provenance():
@@ -268,6 +333,7 @@ def test_build_graphs_writes_and_validates_document_scoped_manifest(tmp_path: Pa
     graphs = load_graph_manifest(manifest_path)
 
     assert manifest["config_hash"] == "config-hash"
+    assert manifest["construction_identity"]
     assert manifest["entries"][0]["page_count"] == 2
     assert graphs["document-a.pdf"].extraction_version == "graph-v1"
     assert graphs["document-a.pdf"].edges[-1].relation == "refers_to"
@@ -286,6 +352,7 @@ def test_load_graph_manifest_rejects_extraction_identity_mismatch(tmp_path: Path
                 "schema_version": 1,
                 "stage": "graph",
                 "config_hash": "config-hash",
+                "construction_identity": graph_construction_identity("graph-v1"),
                 "entries": [
                     {
                         "document_id": "document-a.pdf",
@@ -304,3 +371,61 @@ def test_load_graph_manifest_rejects_extraction_identity_mismatch(tmp_path: Path
 
     with pytest.raises(ValueError, match="extraction"):
         load_graph_manifest(manifest_path)
+
+
+def test_graph_manifest_rejects_construction_identity_mismatch_but_allows_traversal_ablation(
+    tmp_path: Path,
+):
+    """Catches stale construction settings without coupling artifacts to traversal knobs."""
+
+    graph = build_document_graph("document-a.pdf", ["One page."], "source-hash", "graph-v1")
+    graph_path = tmp_path / "document-a.pdf.graph.json"
+    write_graph(graph, graph_path)
+    manifest_path = tmp_path / "graph-manifest.json"
+    payload = {
+        "schema_version": 1,
+        "stage": "graph",
+        "config_hash": "full-build-config-hash",
+        "construction_identity": graph_construction_identity("graph-v1"),
+        "entries": [
+            {
+                "document_id": graph.document_id,
+                "source_sha256": graph.source_sha256,
+                "schema_version": graph.schema_version,
+                "extraction_version": graph.extraction_version,
+                "graph_fingerprint": graph_fingerprint(graph),
+                "page_count": 1,
+                "graph_path": str(graph_path),
+            }
+        ],
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    runtime_config = HarnessConfig.model_validate(
+        {
+            "model": {"model_id": "m", "revision": "r"},
+            "graph": {
+                "enabled": True,
+                "max_hops": 4,
+                "max_candidates": 1,
+                "require_connection": True,
+                "allowed_relations": ["refers_to"],
+                "extraction_version": "graph-v1",
+            },
+        }
+    )
+
+    graphs, _fingerprint, failure = stages._graph_manifest_for_enabled_run(
+        runtime_config, manifest_path
+    )
+
+    assert failure is None
+    assert graphs == {"document-a.pdf": graph}
+
+    payload["construction_identity"] = "wrong-construction-identity"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    _graphs, _fingerprint, failure = stages._graph_manifest_for_enabled_run(
+        runtime_config, manifest_path
+    )
+
+    assert failure is not None
+    assert "construction identity" in failure
